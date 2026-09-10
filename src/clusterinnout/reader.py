@@ -2,13 +2,14 @@ import os
 
 import h5py
 import numpy as np
+from scipy.spatial import cKDTree
 from tqdm import tqdm
 
 
 class BaseReader:
     def __init__(self, group_dir, fof_file_base):
         _fof_files = self._get_fof_files(group_dir, fof_file_base)
-        self._h = self._get_HubbleParams(_fof_files[0])
+        self._h, self._box_size, self._a, self._t_H = self._read_header(_fof_files[0])
 
         for _file in tqdm(_fof_files, total=len(_fof_files)):
             _data = self._read_single_fof_file(_file)
@@ -24,19 +25,34 @@ class BaseReader:
     def _get_fof_files(self, group_dir, fof_file_base):
         fof_files = []
 
-        for file in os.scandir(group_dir):
-            if (
-                file.is_file()
-                and file.name.startswith(fof_file_base)
-                and file.name.endswith(".hdf5")
-            ):
-                fof_files.append(file.path)  # noqa: PERF401
+        with os.scandir(group_dir) as _it:
+            for _file in _it:
+                if (
+                    _file.is_file()
+                    and _file.name.startswith(fof_file_base)
+                    and _file.name.endswith(".hdf5")
+                ):
+                    fof_files.append(_file.path)  # noqa: PERF401
 
         return sorted(fof_files, key=lambda f: int(f.split("/")[-1].split(".")[1]))
 
-    def _get_HubbleParams(self, base_file):
+    def _read_header(self, base_file):
         with h5py.File(base_file, "r") as f:
-            return f["Header"].attrs["HubbleParam"]
+            _header = f["Header"].attrs
+
+            h = _header["HubbleParam"]
+            box_size = _header["BoxSize"] / h
+
+            a = _header["Time"]
+
+            _Omega0 = _header["Omega0"]
+            _OmegaLambda = _header["OmegaLambda"]
+
+            _Ea = np.sqrt(_Omega0 * a**-3 + _OmegaLambda)
+
+            t_H = 9.7779 / h / _Ea
+
+        return h, box_size, a, t_H
 
     def _read_single_fof_file(self, fof_file):
         _msg = "Not implemented in base class."
@@ -48,10 +64,55 @@ class BaseReader:
                 setattr(self, key, [])
             getattr(self, key).append(data_dict[key])
 
-    def save_to_hdf5(self, output_file):
+    def save_to_hdf5(self, output_file, keys=None):
+        keys = keys or self._keys
         with h5py.File(output_file, "w") as f:
-            for key in self._keys:
+            for key in keys:
                 f.create_dataset(key, data=getattr(self, key))
+
+    def match_to_filaments(self, filament_arcs):
+        _arc_midpoints = np.concatenate(
+            [
+                np.concatenate(
+                    [
+                        arc[:-1],
+                        (3 * arc[:-1] + arc[1:]) / 4,
+                        (arc[:-1] + arc[1:]) / 2,
+                        (arc[:-1] + 3 * arc[1:]) / 4,
+                        arc[1:],
+                    ],
+                    axis=0,
+                )
+                for arc in filament_arcs
+            ],
+            axis=0,
+        )
+        # _arc_nums = np.array([5 * (arc.shape[0] - 1) for arc in filament_arcs])
+
+        # _arc_vectors = np.concatenate([
+        #     np.repeat(
+        #         (arc[1:] - arc[:-1]) / np.linalg.norm(arc[1:] - arc[:-1], axis=1, keepdims=True),
+        #         5, axis=0
+        #     ) for arc in filament_arcs
+        # ], axis=0)
+
+        _tree = cKDTree(_arc_midpoints, boxsize=self._box_size)
+
+        filament_dist, _midpoint_idx = _tree.query(self.Position)
+
+        # filament_idx = np.searchsorted(np.cumsum(_arc_nums), _midpoint_idx, side="right")
+
+        _D_avg = self._box_size / self.Position.shape[0] ** (1 / 3)
+        filament_dist_norm = filament_dist / _D_avg
+
+        # self.FilamentIdx = filament_idx
+        self.FilamentDistance = filament_dist
+        self.FilamentNormDistance = filament_dist_norm
+
+        # if calculate_alignment:
+        #     _veloc_vectors = self.Velocity / np.linalg.norm(self.Velocity, axis=1, keepdims=True)
+        #     filament_alignment = np.abs(np.sum(_veloc_vectors * _arc_vectors[_midpoint_idx], axis=1))
+        #     self.FilamentAlignment = filament_alignment
 
 
 class GroupReader(BaseReader):
@@ -62,28 +123,28 @@ class GroupReader(BaseReader):
 
     def _read_single_fof_file(self, fof_file):
         with h5py.File(fof_file, "r") as f:
-            if "GroupCM" not in f["Group"]:
+            if "Group/GroupPos" not in f:
                 return {
-                    "CM": np.empty((0, 3)),
+                    "Position": np.empty((0, 3)),
                     "M200": np.empty(0),
                     "R200": np.empty(0),
                 }
 
-            CM = f["Group"]["GroupCM"][:] / self._h
+            Position = f["Group"]["GroupPos"][:] / self._h
             M200 = f["Group"]["Group_M_Crit200"][:] / self._h
             R200 = f["Group"]["Group_R_Crit200"][:] / self._h
 
             _mask = self._M200_min <= M200
 
         return {
-            "CM": CM[_mask],
+            "Position": Position[_mask],
             "M200": M200[_mask],
             "R200": R200[_mask],
         }
 
 
 class SubhaloReader(BaseReader):
-    def __init__(self, Mdm_min=1e0, Mstar_min=1e-1, *args, **kwargs):
+    def __init__(self, Mdm_min=5e-1, Mstar_min=1e-1, *args, **kwargs):
         self._Mdm_min = Mdm_min
         self._Mstar_min = Mstar_min
 
@@ -91,9 +152,10 @@ class SubhaloReader(BaseReader):
 
     def _read_single_fof_file(self, fof_file):
         with h5py.File(fof_file, "r") as f:
-            if "SubhaloCM" not in f["Subhalo"]:
+            if "Subhalo/SubhaloPos" not in f:
                 return {
-                    "CM": np.empty((0, 3)),
+                    "Position": np.empty((0, 3)),
+                    "Velocity": np.empty((0, 3)),
                     "DMMass": np.empty(0),
                     "StellarMassRatio": np.empty(0),
                     "GasFraction": np.empty(0),
@@ -110,8 +172,11 @@ class SubhaloReader(BaseReader):
                     "VmaxRadius": np.empty(0),
                 }
 
-            # CM
-            CM = f["Subhalo"]["SubhaloCM"][:] / self._h
+            # Position
+            Position = f["Subhalo"]["SubhaloPos"][:] / self._h
+
+            # Velocity
+            Velocity = f["Subhalo"]["SubhaloVel"][:]
 
             # DMMass
             DMMass = f["Subhalo"]["SubhaloMassType"][:, 1] / self._h
@@ -123,11 +188,20 @@ class SubhaloReader(BaseReader):
 
             # GasFraction
             GasFraction = f["Subhalo"]["SubhaloMassType"][:, 0] / (
-                f["Subhalo"]["SubhaloMass"][:] - f["Subhalo"]["SubhaloMassType"][:, 1]
+                f["Subhalo"]["SubhaloMassType"][:, 0]
+                + f["Subhalo"]["SubhaloMassType"][
+                    :, 4
+                ]  # + f["Subhalo"]["SubhaloMassType"][:, 5]
             )
 
             # sSFR
-            sSFR = f["Subhalo"]["SubhaloSFR"][:] / f["Subhalo"]["SubhaloMassType"][:, 4]
+            sSFR = (
+                f["Subhalo"]["SubhaloSFR"][:]
+                / f["Subhalo"]["SubhaloMassType"][:, 4]
+                * self._h
+                / 1e1
+                * self._t_H
+            )
 
             # Color
             Color = (
@@ -153,7 +227,9 @@ class SubhaloReader(BaseReader):
             )
 
             # SpinMagnitude
-            SpinMagnitude = np.linalg.norm(f["Subhalo"]["SubhaloSpin"][:], axis=1)
+            SpinMagnitude = (
+                np.linalg.norm(f["Subhalo"]["SubhaloSpin"][:], axis=1) / self._h
+            )
 
             # VelocityDispersion
             VelocityDispersion = f["Subhalo"]["SubhaloVelDisp"][:]
@@ -173,7 +249,8 @@ class SubhaloReader(BaseReader):
             )
 
             return {
-                "CM": CM[_mask],
+                "Position": Position[_mask],
+                "Velocity": Velocity[_mask],
                 "DMMass": DMMass[_mask],
                 "StellarMassRatio": StellarMassRatio[_mask],
                 "GasFraction": GasFraction[_mask],
@@ -189,3 +266,23 @@ class SubhaloReader(BaseReader):
                 "Vmax": Vmax[_mask],
                 "VmaxRadius": VmaxRadius[_mask],
             }
+
+    def match_to_groups(self, group_pos, group_R200):
+        _tree = cKDTree(group_pos, boxsize=self._box_size)
+
+        group_dist, group_idx = _tree.query(self.Position)
+
+        group_dist_norm = group_dist / group_R200[group_idx]
+
+        self.ClusterIdx = group_idx
+        self.ClusterDistance = group_dist
+        self.ClusterNormDistance = group_dist_norm
+
+    def get_node_distance(self):
+        _D_avg = self._box_size / self.Position.shape[0] ** (1 / 3)
+
+        node_distance = np.sqrt(self.ClusterDistance**2 - self.FilamentDistance**2)
+        node_distance_norm = node_distance / _D_avg
+
+        self.NodeDistance = node_distance
+        self.NodeNormDistance = node_distance_norm
