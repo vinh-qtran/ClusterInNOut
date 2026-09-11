@@ -70,54 +70,10 @@ class BaseReader:
             for key in keys:
                 f.create_dataset(key, data=getattr(self, key))
 
-    def match_to_filaments(self, filament_arcs):
-        _arc_midpoints = np.concatenate(
-            [
-                np.concatenate(
-                    [
-                        arc[:-1],
-                        (3 * arc[:-1] + arc[1:]) / 4,
-                        (arc[:-1] + arc[1:]) / 2,
-                        (arc[:-1] + 3 * arc[1:]) / 4,
-                        arc[1:],
-                    ],
-                    axis=0,
-                )
-                for arc in filament_arcs
-            ],
-            axis=0,
-        )
-        # _arc_nums = np.array([5 * (arc.shape[0] - 1) for arc in filament_arcs])
-
-        # _arc_vectors = np.concatenate([
-        #     np.repeat(
-        #         (arc[1:] - arc[:-1]) / np.linalg.norm(arc[1:] - arc[:-1], axis=1, keepdims=True),
-        #         5, axis=0
-        #     ) for arc in filament_arcs
-        # ], axis=0)
-
-        _tree = cKDTree(_arc_midpoints, boxsize=self._box_size)
-
-        filament_dist, _midpoint_idx = _tree.query(self.Position)
-
-        # filament_idx = np.searchsorted(np.cumsum(_arc_nums), _midpoint_idx, side="right")
-
-        _D_avg = self._box_size / self.Position.shape[0] ** (1 / 3)
-        filament_dist_norm = filament_dist / _D_avg
-
-        # self.FilamentIdx = filament_idx
-        self.FilamentDistance = filament_dist
-        self.FilamentNormDistance = filament_dist_norm
-
-        # if calculate_alignment:
-        #     _veloc_vectors = self.Velocity / np.linalg.norm(self.Velocity, axis=1, keepdims=True)
-        #     filament_alignment = np.abs(np.sum(_veloc_vectors * _arc_vectors[_midpoint_idx], axis=1))
-        #     self.FilamentAlignment = filament_alignment
-
 
 class GroupReader(BaseReader):
-    def __init__(self, M200_min=1e3, *args, **kwargs):
-        self._M200_min = M200_min
+    def __init__(self, M200c_min=1e3, *args, **kwargs):
+        self._M200c_min = M200c_min
 
         super().__init__(*args, **kwargs)
 
@@ -126,20 +82,23 @@ class GroupReader(BaseReader):
             if "Group/GroupPos" not in f:
                 return {
                     "Position": np.empty((0, 3)),
-                    "M200": np.empty(0),
-                    "R200": np.empty(0),
+                    "M200c": np.empty(0),
+                    # "R200c": np.empty(0),
+                    "R200m": np.empty(0),
                 }
 
             Position = f["Group"]["GroupPos"][:] / self._h
-            M200 = f["Group"]["Group_M_Crit200"][:] / self._h
-            R200 = f["Group"]["Group_R_Crit200"][:] / self._h
+            M200c = f["Group"]["Group_M_Crit200"][:] / self._h
+            # R200c = f["Group"]["Group_R_Crit200"][:] / self._h
+            R200m = f["Group"]["Group_R_Mean200"][:] / self._h
 
-            _mask = self._M200_min <= M200
+            _mask = self._M200c_min <= M200c
 
         return {
             "Position": Position[_mask],
-            "M200": M200[_mask],
-            "R200": R200[_mask],
+            "M200c": M200c[_mask],
+            # "R200c": R200c[_mask],
+            "R200m": R200m[_mask],
         }
 
 
@@ -267,22 +226,60 @@ class SubhaloReader(BaseReader):
                 "VmaxRadius": VmaxRadius[_mask],
             }
 
-    def match_to_groups(self, group_pos, group_R200):
+    def match_to_groups(self, group_pos):
         _tree = cKDTree(group_pos, boxsize=self._box_size)
 
         group_dist, group_idx = _tree.query(self.Position)
 
-        group_dist_norm = group_dist / group_R200[group_idx]
-
         self.ClusterIdx = group_idx
         self.ClusterDistance = group_dist
-        self.ClusterNormDistance = group_dist_norm
 
-    def get_node_distance(self):
-        _D_avg = self._box_size / self.Position.shape[0] ** (1 / 3)
+    def get_filament_distances(self, filament_arcs, n_interp=100):
+        _arc_midpoints = np.concatenate(
+            [
+                np.concatenate(
+                    [
+                        ((n_interp - i) * arc[:-1] + i * arc[1:]) / n_interp
+                        for i in range(1, n_interp + 1)
+                    ],
+                    axis=0,
+                )
+                for arc in filament_arcs
+            ],
+            axis=0,
+        )
 
-        node_distance = np.sqrt(self.ClusterDistance**2 - self.FilamentDistance**2)
-        node_distance_norm = node_distance / _D_avg
+        _tree = cKDTree(_arc_midpoints, boxsize=self._box_size)
 
-        self.NodeDistance = node_distance
-        self.NodeNormDistance = node_distance_norm
+        filament_dist, _ = _tree.query(self.Position)
+
+        self.FilamentDistance = filament_dist
+
+    def get_wall_distances(self, wall_triangles):
+        _triangle_midpoints = np.concatenate(
+            [
+                wall_triangles.reshape(-1, 3),
+                wall_triangles.mean(axis=1),
+                wall_triangles[:, [0, 1]].mean(axis=1),
+                wall_triangles[:, [1, 2]].mean(axis=1),
+                wall_triangles[:, [2, 0]].mean(axis=1),
+                wall_triangles[:, [0, 0, 0, 1]].mean(axis=1),
+                wall_triangles[:, [1, 1, 1, 2]].mean(axis=1),
+                wall_triangles[:, [2, 2, 2, 0]].mean(axis=1),
+                wall_triangles[:, [0, 1, 1, 1]].mean(axis=1),
+                wall_triangles[:, [1, 2, 2, 2]].mean(axis=1),
+                wall_triangles[:, [2, 0, 0, 0]].mean(axis=1),
+                wall_triangles[:, [0, 1, 2, 0]].mean(axis=1),
+                wall_triangles[:, [1, 2, 0, 1]].mean(axis=1),
+                wall_triangles[:, [2, 0, 1, 2]].mean(axis=1),
+            ],
+            axis=0,
+        )
+
+        # _triangle_midpoints = _triangle_midpoints % self._box_size
+
+        _tree = cKDTree(_triangle_midpoints, boxsize=self._box_size)
+
+        wall_dist, _ = _tree.query(self.Position)
+
+        self.WallDistance = wall_dist
