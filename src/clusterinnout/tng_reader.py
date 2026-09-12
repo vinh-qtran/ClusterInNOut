@@ -115,17 +115,17 @@ class SubhaloReader(BaseReader):
                 return {
                     "Position": np.empty((0, 3)),
                     "Velocity": np.empty((0, 3)),
+                    "Spin": np.empty((0, 3)),
                     "DMMass": np.empty(0),
                     "StellarMassRatio": np.empty(0),
                     "GasFraction": np.empty(0),
                     "sSFR": np.empty(0),
                     "Color": np.empty(0),
-                    "GasMetallicity": np.empty(0),
                     "StellarMetallicity": np.empty(0),
-                    "GasHalfMassRadius": np.empty(0),
+                    "GasMetallicity": np.empty(0),
                     "DMHalfMassRadius": np.empty(0),
                     "StellarHalfMassRadius": np.empty(0),
-                    "SpinMagnitude": np.empty(0),
+                    "GasHalfMassRadius": np.empty(0),
                     "VelocityDispersion": np.empty(0),
                     "Vmax": np.empty(0),
                     "VmaxRadius": np.empty(0),
@@ -136,6 +136,9 @@ class SubhaloReader(BaseReader):
 
             # Velocity
             Velocity = f["Subhalo"]["SubhaloVel"][:]
+
+            # Spin
+            Spin = f["Subhalo"]["SubhaloSpin"][:] / self._h
 
             # DMMass
             DMMass = f["Subhalo"]["SubhaloMassType"][:, 1] / self._h
@@ -168,14 +171,11 @@ class SubhaloReader(BaseReader):
                 - f["Subhalo"]["SubhaloStellarPhotometrics"][:, 5]
             )
 
-            # GasMetallicity
-            GasMetallicity = f["Subhalo"]["SubhaloGasMetallicity"][:]
-
             # StellarMetallicity
-            StellarMetallicity = f["Subhalo"]["SubhaloStarMetallicity"][:]
+            StellarMetallicity = f["Subhalo"]["SubhaloStarMetallicity"][:] / 0.0127
 
-            # GasHalfMassRadius
-            GasHalfMassRadius = f["Subhalo"]["SubhaloHalfmassRadType"][:, 0] / self._h
+            # GasMetallicity
+            GasMetallicity = f["Subhalo"]["SubhaloGasMetallicity"][:] / 0.0127
 
             # DMHalfMassRadius
             DMHalfMassRadius = f["Subhalo"]["SubhaloHalfmassRadType"][:, 1] / self._h
@@ -185,10 +185,8 @@ class SubhaloReader(BaseReader):
                 f["Subhalo"]["SubhaloHalfmassRadType"][:, 4] / self._h
             )
 
-            # SpinMagnitude
-            SpinMagnitude = (
-                np.linalg.norm(f["Subhalo"]["SubhaloSpin"][:], axis=1) / self._h
-            )
+            # GasHalfMassRadius
+            GasHalfMassRadius = f["Subhalo"]["SubhaloHalfmassRadType"][:, 0] / self._h
 
             # VelocityDispersion
             VelocityDispersion = f["Subhalo"]["SubhaloVelDisp"][:]
@@ -210,17 +208,17 @@ class SubhaloReader(BaseReader):
             return {
                 "Position": Position[_mask],
                 "Velocity": Velocity[_mask],
+                "Spin": Spin[_mask],
                 "DMMass": DMMass[_mask],
                 "StellarMassRatio": StellarMassRatio[_mask],
                 "GasFraction": GasFraction[_mask],
                 "sSFR": sSFR[_mask],
                 "Color": Color[_mask],
-                "GasMetallicity": GasMetallicity[_mask],
                 "StellarMetallicity": StellarMetallicity[_mask],
-                "GasHalfMassRadius": GasHalfMassRadius[_mask],
+                "GasMetallicity": GasMetallicity[_mask],
                 "DMHalfMassRadius": DMHalfMassRadius[_mask],
                 "StellarHalfMassRadius": StellarHalfMassRadius[_mask],
-                "SpinMagnitude": SpinMagnitude[_mask],
+                "GasHalfMassRadius": GasHalfMassRadius[_mask],
                 "VelocityDispersion": VelocityDispersion[_mask],
                 "Vmax": Vmax[_mask],
                 "VmaxRadius": VmaxRadius[_mask],
