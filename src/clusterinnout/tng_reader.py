@@ -72,8 +72,8 @@ class BaseReader:
 
 
 class GroupReader(BaseReader):
-    def __init__(self, M200c_min=1e3, *args, **kwargs):
-        self._M200c_min = M200c_min
+    def __init__(self, M200_min=1e3, *args, **kwargs):
+        self._M200_min = M200_min
 
         super().__init__(*args, **kwargs)
 
@@ -82,23 +82,23 @@ class GroupReader(BaseReader):
             if "Group/GroupPos" not in f:
                 return {
                     "Position": np.empty((0, 3)),
-                    "M200c": np.empty(0),
-                    # "R200c": np.empty(0),
-                    "R200m": np.empty(0),
+                    "M200": np.empty(0),
+                    "R200": np.empty(0),
+                    # "R200m": np.empty(0),
                 }
 
             Position = f["Group"]["GroupPos"][:] / self._h
-            M200c = f["Group"]["Group_M_Crit200"][:] / self._h
-            # R200c = f["Group"]["Group_R_Crit200"][:] / self._h
-            R200m = f["Group"]["Group_R_Mean200"][:] / self._h
+            M200 = f["Group"]["Group_M_Crit200"][:] / self._h
+            R200 = f["Group"]["Group_R_Crit200"][:] / self._h
+            # R200m = f["Group"]["Group_R_Mean200"][:] / self._h
 
-            _mask = self._M200c_min <= M200c
+            _mask = self._M200_min <= M200
 
         return {
             "Position": Position[_mask],
-            "M200c": M200c[_mask],
-            # "R200c": R200c[_mask],
-            "R200m": R200m[_mask],
+            "M200": M200[_mask],
+            "R200": R200[_mask],
+            # "R200m": R200m[_mask],
         }
 
 
@@ -246,11 +246,15 @@ class SubhaloReader(BaseReader):
             ],
             axis=0,
         )
+        _arc_counts = np.array([n_interp * (arc.shape[0] - 1) for arc in filament_arcs])
 
         _tree = cKDTree(_arc_midpoints, boxsize=self._box_size)
 
-        filament_dist, _ = _tree.query(self.Position)
+        filament_dist, _idx = _tree.query(self.Position)
 
+        filament_idx = np.searchsorted(np.cumsum(_arc_counts), _idx, side="right")
+
+        self.FilamentIdx = filament_idx
         self.FilamentDistance = filament_dist
 
     def get_wall_distances(self, wall_triangles):
