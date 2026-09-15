@@ -33,8 +33,12 @@ dynamic = ["version"]
 dependencies = [
     "astropy>=6.1.7",
     "h5py>=3.16.0",
+    "lightgbm>=4.7.0",
     "numpy>=2.2.6",
+    "scikit-learn>=1.7.2",
     "scipy>=1.15.3",
+    "torch>=2.14.0",
+    "torchmetrics>=1.9.0",
     "tqdm>=4.70.0",
 ]
 
@@ -111,6 +115,7 @@ warn_return_any = false
 warn_unused_configs = false
 warn_unused_ignores = false
 enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
+disable_error_code = ["no-untyped-def"]
 
 [[tool.mypy.overrides]]
 module = "clusterinnout.*"

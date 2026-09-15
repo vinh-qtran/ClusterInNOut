@@ -67,6 +67,8 @@ class FilamentReader:
 
         _false_filament_indices = _false_filament_indices[_false_filament_dist == 0]
 
+        self.node_pos = self.node_pos[_cluster_dist < thres]
+
         self.seg_arcs = [
             self.seg_arcs[i]
             for i in range(len(self.seg_arcs))
