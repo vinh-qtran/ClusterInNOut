@@ -72,8 +72,9 @@ class BaseReader:
 
 
 class GroupReader(BaseReader):
-    def __init__(self, M200_min=1e3, *args, **kwargs):
-        self._M200_min = M200_min
+    def __init__(self, M200c_min=1e3, Rsp_R200c_scaler=2.0, *args, **kwargs):
+        self._M200c_min = M200c_min
+        self._Rsp_R200c_scaler = Rsp_R200c_scaler
 
         super().__init__(*args, **kwargs)
 
@@ -82,23 +83,32 @@ class GroupReader(BaseReader):
             if "Group/GroupPos" not in f:
                 return {
                     "Position": np.empty((0, 3)),
-                    "M200": np.empty(0),
-                    "R200": np.empty(0),
-                    # "R200m": np.empty(0),
+                    "M200c": np.empty(0),
+                    "R200c": np.empty(0),
+                    "M200m": np.empty(0),
+                    "R200m": np.empty(0),
+                    "Rsp": np.empty(0),
                 }
 
             Position = f["Group"]["GroupPos"][:] / self._h
-            M200 = f["Group"]["Group_M_Crit200"][:] / self._h
-            R200 = f["Group"]["Group_R_Crit200"][:] / self._h
-            # R200m = f["Group"]["Group_R_Mean200"][:] / self._h
 
-            _mask = self._M200_min <= M200
+            M200c = f["Group"]["Group_M_Crit200"][:] / self._h
+            R200c = f["Group"]["Group_R_Crit200"][:] / self._h
+
+            M200m = f["Group"]["Group_M_Mean200"][:] / self._h
+            R200m = f["Group"]["Group_R_Mean200"][:] / self._h
+
+            Rsp = self._Rsp_R200c_scaler * R200c
+
+            _mask = self._M200c_min <= M200c
 
         return {
             "Position": Position[_mask],
-            "M200": M200[_mask],
-            "R200": R200[_mask],
-            # "R200m": R200m[_mask],
+            "M200c": M200c[_mask],
+            "R200c": R200c[_mask],
+            "M200m": M200m[_mask],
+            "R200m": R200m[_mask],
+            "Rsp": Rsp[_mask],
         }
 
 
@@ -114,6 +124,7 @@ class SubhaloReader(BaseReader):
             if "Subhalo/SubhaloPos" not in f:
                 return {
                     "Position": np.empty((0, 3)),
+                    "Mass": np.empty(0),
                     "Velocity": np.empty((0, 3)),
                     "Spin": np.empty((0, 3)),
                     "DMMass": np.empty(0),
@@ -133,6 +144,9 @@ class SubhaloReader(BaseReader):
 
             # Position
             Position = f["Subhalo"]["SubhaloPos"][:] / self._h
+
+            # Mass
+            Mass = f["Subhalo"]["SubhaloMass"][:] / self._h
 
             # Velocity
             Velocity = f["Subhalo"]["SubhaloVel"][:]
@@ -207,6 +221,7 @@ class SubhaloReader(BaseReader):
 
             return {
                 "Position": Position[_mask],
+                "Mass": Mass[_mask],
                 "Velocity": Velocity[_mask],
                 "Spin": Spin[_mask],
                 "DMMass": DMMass[_mask],
@@ -224,64 +239,17 @@ class SubhaloReader(BaseReader):
                 "VmaxRadius": VmaxRadius[_mask],
             }
 
-    def match_to_groups(self, group_pos):
+    def match_to_groups(self, group_pos, group_radius, n_ngb=32):
         _tree = cKDTree(group_pos, boxsize=self._box_size)
 
-        group_dist, group_idx = _tree.query(self.Position)
+        _group_distances, _group_indices = _tree.query(self.Position, k=n_ngb)
+        _group_norm_distances = _group_distances / group_radius[_group_indices]
 
-        self.ClusterIdx = group_idx
-        self.ClusterDistance = group_dist
+        _galaxy_idx = np.arange(_group_indices.shape[0])
+        _candidate_idx = np.argmin(_group_norm_distances, axis=-1)
 
-    def get_filament_distances(self, filament_arcs, n_interp=100):
-        _arc_midpoints = np.concatenate(
-            [
-                np.concatenate(
-                    [
-                        ((n_interp - i) * arc[:-1] + i * arc[1:]) / n_interp
-                        for i in range(1, n_interp + 1)
-                    ],
-                    axis=0,
-                )
-                for arc in filament_arcs
-            ],
-            axis=0,
-        )
-        _arc_counts = np.array([n_interp * (arc.shape[0] - 1) for arc in filament_arcs])
+        cluster_idx = _group_indices[_galaxy_idx, _candidate_idx]
+        cluster_distance = _group_distances[_galaxy_idx, _candidate_idx]
 
-        _tree = cKDTree(_arc_midpoints, boxsize=self._box_size)
-
-        filament_dist, _idx = _tree.query(self.Position)
-
-        filament_idx = np.searchsorted(np.cumsum(_arc_counts), _idx, side="right")
-
-        self.FilamentIdx = filament_idx
-        self.FilamentDistance = filament_dist
-
-    def get_wall_distances(self, wall_triangles):
-        _triangle_midpoints = np.concatenate(
-            [
-                wall_triangles.reshape(-1, 3),
-                wall_triangles.mean(axis=1),
-                wall_triangles[:, [0, 1]].mean(axis=1),
-                wall_triangles[:, [1, 2]].mean(axis=1),
-                wall_triangles[:, [2, 0]].mean(axis=1),
-                wall_triangles[:, [0, 0, 0, 1]].mean(axis=1),
-                wall_triangles[:, [1, 1, 1, 2]].mean(axis=1),
-                wall_triangles[:, [2, 2, 2, 0]].mean(axis=1),
-                wall_triangles[:, [0, 1, 1, 1]].mean(axis=1),
-                wall_triangles[:, [1, 2, 2, 2]].mean(axis=1),
-                wall_triangles[:, [2, 0, 0, 0]].mean(axis=1),
-                wall_triangles[:, [0, 1, 2, 0]].mean(axis=1),
-                wall_triangles[:, [1, 2, 0, 1]].mean(axis=1),
-                wall_triangles[:, [2, 0, 1, 2]].mean(axis=1),
-            ],
-            axis=0,
-        )
-
-        # _triangle_midpoints = _triangle_midpoints % self._box_size
-
-        _tree = cKDTree(_triangle_midpoints, boxsize=self._box_size)
-
-        wall_dist, _ = _tree.query(self.Position)
-
-        self.WallDistance = wall_dist
+        self.ClusterIdx = cluster_idx
+        self.ClusterDistance = cluster_distance
