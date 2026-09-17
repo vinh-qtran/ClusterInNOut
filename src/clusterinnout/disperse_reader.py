@@ -1,13 +1,12 @@
 import numpy as np
 from scipy.spatial import cKDTree
-from tqdm import tqdm
 
 from clusterinnout.distance_utils import (
     periodic_allclose,
-    periodic_difference,
     periodic_distance,
     periodic_interpolate,
     periodic_mean,
+    periodic_point_line_distance,
     periodic_point_triangle_distance,
 )
 
@@ -85,13 +84,15 @@ class FilamentReader:
         )
 
     def _remove_false_filament_arcs(self, false_filament_indices):
+        false_filament_indices = set(false_filament_indices)
+
         self.filament_arcs = [
             self.filament_arcs[i]
             for i in range(len(self.filament_arcs))
             if i not in false_filament_indices
         ]
 
-    def mask_seg_arcs(self, atol=1e-2):
+    def mask_seg_arcs(self, atol=1):
         if not hasattr(self, "false_node_pos"):
             _msg = "call mask_nodes() before mask_seg_arcs()"
             raise RuntimeError(_msg)
@@ -109,8 +110,8 @@ class FilamentReader:
         cluster_pos,
         cluster_radius,
         n_candidates=32,
-        thresholds=(0.5, 2),
-        atol=1e-2,
+        threshold=2,
+        atol=1,
     ):
         _cluster_tree = cKDTree(cluster_pos, boxsize=self._box_size)
 
@@ -129,9 +130,7 @@ class FilamentReader:
 
         _false_filament_indices = []
 
-        for i, _arc in tqdm(
-            enumerate(self.filament_arcs), total=len(self.filament_arcs)
-        ):
+        for i, _arc in enumerate(self.filament_arcs):
             _arc_end_norm_distances = _arc_end_cluster_norm_distances[i].reshape(-1)
             _arc_end_indices = _arc_end_cluster_indices[i].reshape(-1)
 
@@ -144,15 +143,11 @@ class FilamentReader:
                 _filament_cluster_distance / cluster_radius[_filament_cluster_idx]
             )
 
-            if _filament_cluster_norm_distance[-1] > thresholds[0]:
-                _false_filament_indices.append(i)
-                continue
-
             _seg_lengths = periodic_distance(_arc[:-1], _arc[1:], self._box_size)
 
             _filament_length = np.sum(_seg_lengths)
             _filament_effective_length = np.sum(
-                _seg_lengths[_filament_cluster_norm_distance[:-1] > thresholds[1]]
+                _seg_lengths[_filament_cluster_norm_distance[:-1] > threshold]
             )
 
             if _filament_effective_length < atol:
@@ -184,31 +179,6 @@ class FilamentReader:
             np.concatenate(_seg_arc_idx, axis=0),
         )
 
-    def _get_galaxy_segment_distances(
-        self, galaxy_pos, line_start, line_end, box_size, atol=1e-2
-    ):
-        _galaxy_pos = galaxy_pos.reshape(-1, 1, 3)
-
-        _line_vec = periodic_difference(line_end, line_start, box_size)
-        _point_vec = periodic_difference(_galaxy_pos, line_start, box_size)
-
-        _line_length = np.linalg.norm(_line_vec, axis=-1)
-        _safe_length = np.where(_line_length < atol, 1.0, _line_length)
-        _line_unit_vec = _line_vec / _safe_length[..., None]
-
-        _proj_length = np.sum(_point_vec * _line_unit_vec, axis=-1)
-        _proj_length_clamped = np.clip(_proj_length, 0.0, _line_length)
-
-        _proj_point = (
-            line_start + _proj_length_clamped[..., None] * _line_unit_vec
-        ) % box_size
-
-        _dist = np.linalg.norm(
-            periodic_difference(_galaxy_pos, _proj_point, box_size), axis=-1
-        )
-
-        return np.where(_line_length < atol, np.linalg.norm(_point_vec, axis=-1), _dist)
-
     def get_galaxy_filament_distances(self, galaxy_pos, n_interp=15, n_candidates=32):
         _seg_starts, _seg_ends, _seg_arc_idx = self._get_segment_arrays()
 
@@ -231,8 +201,11 @@ class FilamentReader:
         _candidate_seg_starts = _seg_starts[_candidate_seg_indices]
         _candidate_seg_ends = _seg_ends[_candidate_seg_indices]
 
-        _galaxy_seg_distances = self._get_galaxy_segment_distances(
-            galaxy_pos, _candidate_seg_starts, _candidate_seg_ends, self._box_size
+        _galaxy_seg_distances = periodic_point_line_distance(
+            galaxy_pos.reshape(-1, 1, 3),
+            _candidate_seg_starts,
+            _candidate_seg_ends,
+            self._box_size,
         )
 
         _best_candidate_indices = np.argmin(_galaxy_seg_distances, axis=-1)
@@ -272,11 +245,10 @@ class FilamentReader:
         _galaxy_mass = galaxy_masses[_galaxy_mask]
         _galaxy_filament_indices = galaxy_filament_indices[_galaxy_mask]
 
-        return np.array(
-            [
-                np.sum(_galaxy_mass[_galaxy_filament_indices == i])
-                for i in range(len(self.filament_arcs))
-            ]
+        return np.bincount(
+            _galaxy_filament_indices,
+            weights=_galaxy_mass,
+            minlength=len(self.filament_arcs),
         )
 
     def save_filament_arcs(self, filament_arcs_file):

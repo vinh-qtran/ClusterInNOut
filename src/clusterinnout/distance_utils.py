@@ -7,7 +7,7 @@ def periodic_difference(pos1, pos2, box_size):
     return np.where(_delta < -0.5 * box_size, _delta + box_size, _delta)
 
 
-def periodic_allclose(pos1, pos2, box_size, atol=1e-2):
+def periodic_allclose(pos1, pos2, box_size, atol=1):
     _delta = periodic_difference(pos1, pos2, box_size)
     return np.all(np.abs(_delta) < atol, axis=-1)
 
@@ -35,7 +35,25 @@ def periodic_interpolate(pos1, pos2, box_size, n_interp=15):
     )
 
 
-def _closest_point_on_triangle(p, a, b, c, atol=1e-2):
+def periodic_point_line_distance(p, a, b, box_size, atol=1):
+    _ab = periodic_difference(b, a, box_size)
+    _ap = periodic_difference(p, a, box_size)
+
+    _line_length = np.linalg.norm(_ab, axis=-1)
+    _safe_length = np.where(_line_length < atol, 1.0, _line_length)
+    _line_unit_vec = _ab / _safe_length[..., None]
+
+    _proj_length = np.sum(_ap * _line_unit_vec, axis=-1)
+    _proj_length_clamped = np.clip(_proj_length, 0.0, _line_length)
+
+    _proj_point = (a + _proj_length_clamped[..., None] * _line_unit_vec) % box_size
+
+    _dist = np.linalg.norm(periodic_difference(p, _proj_point, box_size), axis=-1)
+
+    return np.where(_line_length < atol, np.linalg.norm(_ap, axis=-1), _dist)
+
+
+def _closest_point_on_triangle(p, a, b, c, atol=1):
     _ab = b - a
     _ac = c - a
     _ap = p - a

@@ -72,11 +72,15 @@ class BaseReader:
 
 
 class GroupReader(BaseReader):
-    def __init__(self, M200c_min=1e3, Rsp_R200c_scaler=2.0, *args, **kwargs):
+    def __init__(
+        self, M200c_min=1e3, Rsp_R200m_scaler=1.15, Msp_M200m_scaler=1e3, **kwargs
+    ):
         self._M200c_min = M200c_min
-        self._Rsp_R200c_scaler = Rsp_R200c_scaler
 
-        super().__init__(*args, **kwargs)
+        self._Rsp_R200m_scaler = Rsp_R200m_scaler
+        self._Msp_M200m_scaler = Msp_M200m_scaler
+
+        super().__init__(**kwargs)
 
     def _read_single_fof_file(self, fof_file):
         with h5py.File(fof_file, "r") as f:
@@ -87,6 +91,7 @@ class GroupReader(BaseReader):
                     "R200c": np.empty(0),
                     "M200m": np.empty(0),
                     "R200m": np.empty(0),
+                    "Msp": np.empty(0),
                     "Rsp": np.empty(0),
                 }
 
@@ -98,7 +103,8 @@ class GroupReader(BaseReader):
             M200m = f["Group"]["Group_M_Mean200"][:] / self._h
             R200m = f["Group"]["Group_R_Mean200"][:] / self._h
 
-            Rsp = self._Rsp_R200c_scaler * R200c
+            Msp = self._Msp_M200m_scaler * M200m
+            Rsp = self._Rsp_R200m_scaler * R200m
 
             _mask = self._M200c_min <= M200c
 
@@ -108,16 +114,17 @@ class GroupReader(BaseReader):
             "R200c": R200c[_mask],
             "M200m": M200m[_mask],
             "R200m": R200m[_mask],
+            "Msp": Msp[_mask],
             "Rsp": Rsp[_mask],
         }
 
 
 class SubhaloReader(BaseReader):
-    def __init__(self, Mdm_min=5e-1, Mstar_min=1e-1, *args, **kwargs):
+    def __init__(self, Mdm_min=6e-1, Mstar_min=3e-2, **kwargs):
         self._Mdm_min = Mdm_min
         self._Mstar_min = Mstar_min
 
-        super().__init__(*args, **kwargs)
+        super().__init__(**kwargs)
 
     def _read_single_fof_file(self, fof_file):
         with h5py.File(fof_file, "r") as f:
