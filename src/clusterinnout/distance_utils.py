@@ -24,6 +24,11 @@ def periodic_mean(pos, box_size, axis=0):
     return np.mean(_unwrapped, axis=axis) % box_size
 
 
+def periodic_length(pos, box_size):
+    _delta = periodic_difference(pos[1:], pos[:-1], box_size)
+    return np.sum(np.linalg.norm(_delta, axis=-1))
+
+
 def periodic_interpolate(pos1, pos2, box_size, n_interp=15):
     _delta = periodic_difference(pos2, pos1, box_size)
     return np.concatenate(

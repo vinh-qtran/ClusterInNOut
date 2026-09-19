@@ -1,10 +1,14 @@
+import json
+
 import numpy as np
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components
 from scipy.spatial import cKDTree
 
 from clusterinnout.distance_utils import (
-    periodic_allclose,
     periodic_distance,
     periodic_interpolate,
+    periodic_length,
     periodic_mean,
     periodic_point_line_distance,
     periodic_point_triangle_distance,
@@ -12,163 +16,222 @@ from clusterinnout.distance_utils import (
 
 
 class FilamentReader:
-    def __init__(self, skl_crits_file, skl_segs_file, box_size):
+    def __init__(
+        self, ndskl_file, box_size, cluster_dict=None, galaxy_dict=None, r_filament=1e3
+    ):
         self._box_size = box_size
 
-        self.node_pos, self.void_pos = self._read_skl_crits(skl_crits_file)
+        self._read_ndskl_ascii(ndskl_file)
+        self._assign_nodes()
 
-        self.filament_arcs = self._read_skl_segs(skl_segs_file)
+        if cluster_dict is not None:
+            self.ClusterNode_Idx, self.Node_ClusterIdx = self._match_node_to_cluster(
+                self.Node_Pos,
+                cluster_dict["Position"],
+                cluster_dict["R200c"],
+            )
 
-    def _read_skl_crits(self, skl_crits_file):
-        _crits_data = np.loadtxt(skl_crits_file)
+            self.ClusterFilament_Idx = np.nonzero(
+                np.isin(self.Filament_NodeIdx, self.ClusterNode_Idx)
+            )[0]
 
-        _node_mask = np.logical_and(_crits_data[:, 6] == 0, _crits_data[:, 4] == 3)
-        _void_mask = np.logical_and(_crits_data[:, 6] == 0, _crits_data[:, 4] == 0)
+            _valid = np.isin(self.Filament_NodeIdx, self.ClusterNode_Idx)
+            self.Filament_ClusterIdx = np.where(
+                _valid, self.Node_ClusterIdx[self.Filament_NodeIdx], -1
+            )
 
-        node_pos = _crits_data[_node_mask, 0:3] % self._box_size
-        void_pos = _crits_data[_void_mask, 0:3] % self._box_size
+            self.Filament_EffLength = self._get_filament_eff_length(
+                self.Filament_Arc,
+                self.Filament_ClusterIdx,
+                cluster_dict["Position"],
+                cluster_dict["Rsp"],
+            )
 
-        return node_pos, void_pos
+            if galaxy_dict is not None:
+                self.Galaxy_FilamentDistance, self.Galaxy_FilamentIdx = (
+                    self._get_galaxy_filament_distance(
+                        self.Filament_Arc, galaxy_dict["Position"]
+                    )
+                )
 
-    def _read_skl_segs(self, skl_segs_file):
-        _segs_data = np.loadtxt(skl_segs_file)
+                self.Filament_EffMass = self._get_filament_effective_mass(
+                    len(self.Filament_Arc),
+                    cluster_dict["Position"],
+                    cluster_dict["Rsp"],
+                    galaxy_dict["Position"],
+                    galaxy_dict["Mass"],
+                    galaxy_dict["ClusterIdx"],
+                    self.Galaxy_FilamentDistance,
+                    self.Galaxy_FilamentIdx,
+                    r_filament,
+                )
 
-        _mask = np.logical_and(
-            _segs_data[:, 8] == 2,
-            _segs_data[:, 9] == 0,
+                self.Filament_EffMassPerLength = np.where(
+                    self.Filament_EffLength > 0,
+                    self.Filament_EffMass / self.Filament_EffLength,
+                    0.0,
+                )
+
+    def _read_ndskl_ascii(self, filename, allowed_kinds=None):
+        if allowed_kinds is None:
+            allowed_kinds = {(3, 2), (3, 4), (4, 2), (4, 4)}
+
+        with open(filename) as f:  # noqa: PTH123
+            _lines = [_ln.strip() for _ln in f if _ln.strip()]
+
+        _ndims = int(_lines[1].split()[0])
+
+        i = _lines.index("[CRITICAL POINTS]") + 1
+        _ncrit = int(_lines[i])
+        i += 1
+        _cp_type = np.empty(_ncrit, int)
+        _cp_pos = np.empty((_ncrit, _ndims))
+        _cp_bnd = np.empty(_ncrit, int)
+        for _k in range(_ncrit):
+            _v = _lines[i].split()
+            _cp_type[_k] = int(_v[0])
+            _cp_pos[_k] = np.array(_v[1 : 1 + _ndims], float)
+            _cp_bnd[_k] = int(_v[3 + _ndims])
+            i += 2 + int(_lines[i + 1])
+
+        i = _lines.index("[FILAMENTS]", i) + 1
+        _nfil = int(_lines[i])
+        i += 1
+        _fil_cp = np.empty((_nfil, 2), int)
+        _fil_pts = []
+        for _k in range(_nfil):
+            _c1, _c2, _n = map(int, _lines[i].split())
+            i += 1
+            _fil_cp[_k] = _c1, _c2
+            _fil_pts.append(
+                np.array(" ".join(_lines[i : i + _n]).split(), float).reshape(
+                    _n, _ndims
+                )
+            )
+            i += _n
+
+        _keep_cp = np.isin(_cp_type, [2, 3, 4]) & (_cp_bnd == 0)
+        _new_id = np.full(_ncrit, -1)
+        _new_id[_keep_cp] = np.arange(_keep_cp.sum())
+
+        _t = _cp_type[_fil_cp]
+        _pair_ok = np.array(
+            [(a, b) in allowed_kinds or (b, a) in allowed_kinds for a, b in _t], bool
+        ).reshape(-1)
+        _keep_fil = np.nonzero(_keep_cp[_fil_cp].all(axis=1) & _pair_ok)[0]
+
+        self.CP_Type = _cp_type[_keep_cp]
+        self.CP_Pos = _cp_pos[_keep_cp] % self._box_size
+
+        self.Node_CPIdx = np.where(self.CP_Type == 3)[0]
+        self.Node_Pos = self.CP_Pos[self.Node_CPIdx]
+
+        self.Filament_CPs = _new_id[_fil_cp[_keep_fil]]
+        self.Filament_Arc = [_fil_pts[k] % self._box_size for k in _keep_fil]
+
+        self.Filament_Length = np.array(
+            [periodic_length(arc, self._box_size) for arc in self.Filament_Arc]
         )
 
-        _seg_u_pos = _segs_data[_mask, 0:3] % self._box_size
-        _seg_v_pos = _segs_data[_mask, 3:6] % self._box_size
+    def _assign_nodes(self):
+        _types = self.CP_Type
+        _ncp = len(_types)
+        _c1, _c2 = self.Filament_CPs.T
+        _upper = _types != 2
 
-        filament_arcs = []
+        _e = _upper[_c1] & _upper[_c2]
+        _G = coo_matrix((np.ones(_e.sum()), (_c1[_e], _c2[_e])), shape=(_ncp, _ncp))
+        _, _comp = connected_components(_G, directed=False)
 
-        _current = [_seg_u_pos[0], _seg_v_pos[0]]
-        for i in range(1, _seg_u_pos.shape[0]):
-            if periodic_allclose(_seg_u_pos[i], _seg_v_pos[i], self._box_size):
-                continue
+        _max_ids = np.nonzero(_types == 3)[0]
+        _comp_max = np.full(_comp.max() + 1, -1)
+        _comp_max[_comp[_max_ids]] = _max_ids
 
-            if periodic_allclose(_seg_u_pos[i], _seg_v_pos[i - 1], self._box_size):
-                _current.append(_seg_v_pos[i])
-            else:
-                filament_arcs.append(np.array(_current))
-                _current = [_seg_u_pos[i], _seg_v_pos[i]]
-        filament_arcs.append(np.array(_current))
+        _cp_node = _comp_max[_comp]
+        _cp_node[_max_ids] = _max_ids
+        _cp_node[~_upper] = -1
 
-        return filament_arcs
+        _up = np.where((_types[_c1] == 3) | (_types[_c2] == 2), _c1, _c2)
 
-    def mask_nodes(self, cluster_pos, cluster_radius, n_candidates=32, threshold=1):
-        _cluster_tree = cKDTree(cluster_pos, boxsize=self._box_size)
+        _cp_to_node = np.full(_ncp, -1)
+        _cp_to_node[self.Node_CPIdx] = np.arange(len(self.Node_CPIdx))
 
-        _node_cluster_dististances, _node_cluster_indices = _cluster_tree.query(
-            self.node_pos, k=n_candidates
-        )
-        _node_cluster_norm_distances = (
-            _node_cluster_dististances / cluster_radius[_node_cluster_indices]
-        )
+        _n = _cp_node[_up]
 
-        _node_idx = np.arange(_node_cluster_indices.shape[0])
-        _candidate_idx = np.argmin(_node_cluster_norm_distances, axis=-1)
+        self.Filament_NodeIdx = np.where(_n >= 0, _cp_to_node[_n], -1)
 
-        _node_cluster_norm_dist = _node_cluster_norm_distances[
-            _node_idx, _candidate_idx
-        ]
-
-        self.false_node_pos = self.node_pos[_node_cluster_norm_dist >= threshold]
-        self.node_pos = self.node_pos[_node_cluster_norm_dist < threshold]
-
-    def _get_arc_ends(self):
-        return np.concatenate(
-            [arc[-1].reshape(-1, 3) for arc in self.filament_arcs],
-            axis=0,
-        )
-
-    def _remove_false_filament_arcs(self, false_filament_indices):
-        false_filament_indices = set(false_filament_indices)
-
-        self.filament_arcs = [
-            self.filament_arcs[i]
-            for i in range(len(self.filament_arcs))
-            if i not in false_filament_indices
-        ]
-
-    def mask_seg_arcs(self, atol=1):
-        if not hasattr(self, "false_node_pos"):
-            _msg = "call mask_nodes() before mask_seg_arcs()"
-            raise RuntimeError(_msg)
-
-        _arc_ends = self._get_arc_ends()
-
-        _false_node_tree = cKDTree(self.false_node_pos, boxsize=self._box_size)
-
-        _arc_end_false_node_dist, _ = _false_node_tree.query(_arc_ends)
-
-        self._remove_false_filament_arcs(np.where(_arc_end_false_node_dist < atol)[0])
-
-    def get_filament_cluster_indices_and_lengths(
-        self,
-        cluster_pos,
-        cluster_radius,
-        n_candidates=32,
-        threshold=2,
-        atol=1,
+    def _match_node_to_cluster(
+        self, node_pos, cluster_pos, cluster_radius, n_candidates=32
     ):
         _cluster_tree = cKDTree(cluster_pos, boxsize=self._box_size)
 
-        _arc_ends = self._get_arc_ends()
-        _arc_end_cluster_distances, _arc_end_cluster_indices = _cluster_tree.query(
-            _arc_ends, k=n_candidates
+        _node_cluster_distances, _node_cluster_indices = _cluster_tree.query(
+            node_pos, k=n_candidates
+        )
+        _node_cluster_norm_distances = (
+            _node_cluster_distances / cluster_radius[_node_cluster_indices]
         )
 
-        _arc_end_cluster_norm_distances = (
-            _arc_end_cluster_distances / cluster_radius[_arc_end_cluster_indices]
-        )
+        _all_node_idx = np.arange(_node_cluster_indices.shape[0])
+        _candidate_cluster_idx = np.argmin(_node_cluster_norm_distances, axis=-1)
 
-        filament_cluster_indices = []
-        filament_lengths = []
-        filament_effective_lengths = []
+        _node_cluster_norm_dist = _node_cluster_norm_distances[
+            _all_node_idx, _candidate_cluster_idx
+        ]
+        _node_cluster_idx = _node_cluster_indices[_all_node_idx, _candidate_cluster_idx]
 
-        _false_filament_indices = []
+        return _all_node_idx[_node_cluster_norm_dist < 1.0], _node_cluster_idx
 
-        for i, _arc in enumerate(self.filament_arcs):
-            _arc_end_norm_distances = _arc_end_cluster_norm_distances[i].reshape(-1)
-            _arc_end_indices = _arc_end_cluster_indices[i].reshape(-1)
+    def _get_filament_eff_length(
+        self, filament_arc, filament_cluster_index, cluster_pos, cluster_boundary
+    ):
+        filament_eff_length = np.zeros(len(filament_arc), float)
 
-            _filament_cluster_idx = _arc_end_indices[np.argmin(_arc_end_norm_distances)]
-
-            _filament_cluster_distance = periodic_distance(
-                _arc, cluster_pos[_filament_cluster_idx], self._box_size
-            )
-            _filament_cluster_norm_distance = (
-                _filament_cluster_distance / cluster_radius[_filament_cluster_idx]
-            )
-
-            _seg_lengths = periodic_distance(_arc[:-1], _arc[1:], self._box_size)
-
-            _filament_length = np.sum(_seg_lengths)
-            _filament_effective_length = np.sum(
-                _seg_lengths[_filament_cluster_norm_distance[:-1] > threshold]
-            )
-
-            if _filament_effective_length < atol:
-                _false_filament_indices.append(i)
+        for i, _arc in enumerate(filament_arc):
+            _cluster_idx = filament_cluster_index[i]
+            if _cluster_idx < 0:
+                filament_eff_length[i] = periodic_length(_arc, self._box_size)
                 continue
 
-            filament_cluster_indices.append(_filament_cluster_idx)
-            filament_lengths.append(_filament_length)
-            filament_effective_lengths.append(_filament_effective_length)
+            _cluster_pos = cluster_pos[filament_cluster_index[i]]
+            _cluster_boundary = cluster_boundary[filament_cluster_index[i]]
 
-        self._remove_false_filament_arcs(_false_filament_indices)
+            _segment_cluster_distance = periodic_distance(
+                _arc, _cluster_pos, self._box_size
+            )
+            _segment_length = periodic_distance(_arc[:-1], _arc[1:], self._box_size)
 
-        return (
-            np.array(filament_cluster_indices),
-            np.array(filament_lengths),
-            np.array(filament_effective_lengths),
-        )
+            _upper_segment_cluster_distance = np.maximum(
+                _segment_cluster_distance[:-1], _segment_cluster_distance[1:]
+            )
+            _lower_segment_cluster_distance = np.minimum(
+                _segment_cluster_distance[:-1], _segment_cluster_distance[1:]
+            )
 
-    def _get_segment_arrays(self):
+            _segment_radial_span = (
+                _upper_segment_cluster_distance - _lower_segment_cluster_distance
+            )
+
+            _segment_non_cluster_fraction = np.clip(
+                np.where(
+                    _segment_radial_span > 0,
+                    (_upper_segment_cluster_distance - _cluster_boundary)
+                    / _segment_radial_span,
+                    (_lower_segment_cluster_distance > _cluster_boundary).astype(float),
+                ),
+                0.0,
+                1.0,
+            )
+
+            filament_eff_length[i] = np.sum(
+                _segment_length * _segment_non_cluster_fraction
+            )
+
+        return filament_eff_length
+
+    def _get_segment_arrays(self, filament_arc):
         _seg_starts, _seg_ends, _seg_arc_idx = [], [], []
-        for i, arc in enumerate(self.filament_arcs):
+        for i, arc in enumerate(filament_arc):
             _seg_starts.append(arc[:-1])
             _seg_ends.append(arc[1:])
             _seg_arc_idx.append(np.full(arc.shape[0] - 1, i))
@@ -179,8 +242,10 @@ class FilamentReader:
             np.concatenate(_seg_arc_idx, axis=0),
         )
 
-    def get_galaxy_filament_distances(self, galaxy_pos, n_interp=15, n_candidates=32):
-        _seg_starts, _seg_ends, _seg_arc_idx = self._get_segment_arrays()
+    def _get_galaxy_filament_distance(
+        self, filament_arc, galaxy_pos, n_interp=15, n_candidates=32
+    ):
+        _seg_starts, _seg_ends, _seg_arc_idx = self._get_segment_arrays(filament_arc)
 
         _interp_points = periodic_interpolate(
             _seg_starts, _seg_ends, self._box_size, n_interp=n_interp
@@ -208,38 +273,41 @@ class FilamentReader:
             self._box_size,
         )
 
-        _best_candidate_indices = np.argmin(_galaxy_seg_distances, axis=-1)
-        _galalaxy_indices = np.arange(galaxy_pos.shape[0])
+        _best_candidate_idx = np.argmin(_galaxy_seg_distances, axis=-1)
+        _galalaxy_idx = np.arange(galaxy_pos.shape[0])
 
-        galaxy_filament_distances = _galaxy_seg_distances[
-            _galalaxy_indices, _best_candidate_indices
-        ]
-        galaxy_filament_indices = _seg_arc_idx[
-            _candidate_seg_indices[_galalaxy_indices, _best_candidate_indices]
+        galaxy_filament_dist = _galaxy_seg_distances[_galalaxy_idx, _best_candidate_idx]
+        galaxy_filament_idx = _seg_arc_idx[
+            _candidate_seg_indices[_galalaxy_idx, _best_candidate_idx]
         ]
 
-        return galaxy_filament_distances, galaxy_filament_indices
+        return galaxy_filament_dist, galaxy_filament_idx
 
-    def get_filament_effective_masses(
+    def _get_filament_effective_mass(
         self,
-        filament_cluster_pos,
-        filament_cluster_radius,
+        N_filaments,
+        cluster_pos,
+        cluster_boundary,
         galaxy_pos,
         galaxy_masses,
+        galaxy_cluster_indices,
         galaxy_filament_distances,
         galaxy_filament_indices,
-        r_filament=1e3,
-        threshold=1,
+        r_filament,
     ):
-        _galaxy_mask = np.logical_and(
-            galaxy_filament_distances < r_filament,
+        _galaxy_in_filament_mask = galaxy_filament_distances < r_filament
+
+        _galaxy_out_cluster_mask = (
             periodic_distance(
                 galaxy_pos,
-                filament_cluster_pos[galaxy_filament_indices],
+                cluster_pos[galaxy_cluster_indices],
                 self._box_size,
             )
-            / filament_cluster_radius[galaxy_filament_indices]
-            > threshold,
+            > cluster_boundary[galaxy_cluster_indices]
+        )
+
+        _galaxy_mask = np.logical_and(
+            _galaxy_in_filament_mask, _galaxy_out_cluster_mask
         )
 
         _galaxy_mass = galaxy_masses[_galaxy_mask]
@@ -248,21 +316,43 @@ class FilamentReader:
         return np.bincount(
             _galaxy_filament_indices,
             weights=_galaxy_mass,
-            minlength=len(self.filament_arcs),
+            minlength=N_filaments,
         )
 
     def save_filament_arcs(self, filament_arcs_file):
-        np.savez(
-            filament_arcs_file,
-            **{f"{i}": self.filament_arcs[i] for i in range(len(self.filament_arcs))},
-        )
+        with open(filament_arcs_file, "w") as f:  # noqa: PTH123
+            json.dump(
+                {
+                    "CP_Type": self.CP_Type.tolist(),
+                    "CP_Pos": self.CP_Pos.tolist(),
+                    "Node_CPIdx": self.Node_CPIdx.tolist(),
+                    "Node_Pos": self.Node_Pos.tolist(),
+                    "ClusterNode_Idx": self.ClusterNode_Idx.tolist(),
+                    "Node_ClusterIdx": self.Node_ClusterIdx.tolist(),
+                    "Filament_CPs": self.Filament_CPs.tolist(),
+                    "Filament_Arc": [arc.tolist() for arc in self.Filament_Arc],
+                    "Filament_NodeIdx": self.Filament_NodeIdx.tolist(),
+                    "ClusterFilament_Idx": self.ClusterFilament_Idx.tolist(),
+                    "Filament_ClusterIdx": self.Filament_ClusterIdx.tolist(),
+                    "Filament_Length": self.Filament_Length.tolist(),
+                    "Filament_EffLength": self.Filament_EffLength.tolist(),
+                    "Filament_EffMass": self.Filament_EffMass.tolist(),
+                    "Filament_EffMassPerLength": self.Filament_EffMassPerLength.tolist(),
+                },
+                f,
+            )
 
 
 class WallReader:
-    def __init__(self, wall_file, box_size):
+    def __init__(self, wall_file, box_size, galaxy_dict=None):
         self._box_size = box_size
 
         self.wall_triangles = self._read_wall_triangles(wall_file)
+
+        if galaxy_dict is not None:
+            self.Galaxy_WallDistance = self._get_galaxy_wall_distances(
+                galaxy_dict["Position"]
+            )
 
     def _read_wall_triangles(self, wall_file):
         with open(wall_file) as f:  # noqa: PTH123
@@ -302,7 +392,7 @@ class WallReader:
 
         return vertices[triangle_indices] % self._box_size
 
-    def get_galaxy_wall_distances(
+    def _get_galaxy_wall_distances(
         self, galaxy_pos, dense_midpoints=True, n_candidates=32
     ):
         _n_tri = self.wall_triangles.shape[0]
