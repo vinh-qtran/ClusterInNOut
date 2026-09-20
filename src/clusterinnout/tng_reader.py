@@ -2,8 +2,11 @@ import os
 
 import h5py
 import numpy as np
-from scipy.spatial import cKDTree
 from tqdm import tqdm
+
+from clusterinnout.distance_utils import (
+    periodic_cluster_match,
+)
 
 
 class BaseReader:
@@ -72,13 +75,10 @@ class BaseReader:
 
 
 class GroupReader(BaseReader):
-    def __init__(
-        self, M200c_min=1e3, Rsp_R200m_scaler=1.15, Msp_M200m_scaler=1e3, **kwargs
-    ):
+    def __init__(self, M200c_min=1e3, Rsp_R200m_scaler=1, **kwargs):
         self._M200c_min = M200c_min
 
         self._Rsp_R200m_scaler = Rsp_R200m_scaler
-        self._Msp_M200m_scaler = Msp_M200m_scaler
 
         super().__init__(**kwargs)
 
@@ -91,7 +91,6 @@ class GroupReader(BaseReader):
                     "R200c": np.empty(0),
                     "M200m": np.empty(0),
                     "R200m": np.empty(0),
-                    "Msp": np.empty(0),
                     "Rsp": np.empty(0),
                 }
 
@@ -103,7 +102,6 @@ class GroupReader(BaseReader):
             M200m = f["Group"]["Group_M_Mean200"][:] / self._h
             R200m = f["Group"]["Group_R_Mean200"][:] / self._h
 
-            Msp = self._Msp_M200m_scaler * M200m
             Rsp = self._Rsp_R200m_scaler * R200m
 
             _mask = self._M200c_min <= M200c
@@ -114,7 +112,6 @@ class GroupReader(BaseReader):
             "R200c": R200c[_mask],
             "M200m": M200m[_mask],
             "R200m": R200m[_mask],
-            "Msp": Msp[_mask],
             "Rsp": Rsp[_mask],
         }
 
@@ -166,21 +163,20 @@ class SubhaloReader(BaseReader):
 
             # StellarMassRatio
             StellarMassRatio = (
-                f["Subhalo"]["SubhaloMassType"][:, 4] / f["Subhalo"]["SubhaloMass"][:]
+                f["Subhalo"]["SubhaloMassInRadType"][:, 4]
+                / f["Subhalo"]["SubhaloMass"][:]
             )
 
             # GasFraction
-            GasFraction = f["Subhalo"]["SubhaloMassType"][:, 0] / (
-                f["Subhalo"]["SubhaloMassType"][:, 0]
-                + f["Subhalo"]["SubhaloMassType"][
-                    :, 4
-                ]  # + f["Subhalo"]["SubhaloMassType"][:, 5]
+            GasFraction = (f["Subhalo"]["SubhaloMassInRadType"][:, 0]) / (
+                f["Subhalo"]["SubhaloMassInRadType"][:, 0]
+                + f["Subhalo"]["SubhaloMassInRadType"][:, 4]
             )
 
             # sSFR
             sSFR = (
-                f["Subhalo"]["SubhaloSFR"][:]
-                / f["Subhalo"]["SubhaloMassType"][:, 4]
+                f["Subhalo"]["SubhaloSFRinRad"][:]
+                / f["Subhalo"]["SubhaloMassInRadType"][:, 4]
                 * self._h
                 / 1e1
                 * self._t_H
@@ -221,7 +217,8 @@ class SubhaloReader(BaseReader):
             _mask = np.logical_and(
                 np.logical_and(
                     f["Subhalo"]["SubhaloMassType"][:, 1] / self._h >= self._Mdm_min,
-                    f["Subhalo"]["SubhaloMassType"][:, 4] / self._h >= self._Mstar_min,
+                    f["Subhalo"]["SubhaloMassInRadType"][:, 4] / self._h
+                    >= self._Mstar_min,
                 ),
                 f["Subhalo"]["SubhaloFlag"][:] == 1,
             )
@@ -246,17 +243,18 @@ class SubhaloReader(BaseReader):
                 "VmaxRadius": VmaxRadius[_mask],
             }
 
-    def match_to_groups(self, group_pos, group_radius, n_ngb=32):
-        _tree = cKDTree(group_pos, boxsize=self._box_size)
-
-        _group_distances, _group_indices = _tree.query(self.Position, k=n_ngb)
-        _group_norm_distances = _group_distances / group_radius[_group_indices]
-
-        _galaxy_idx = np.arange(_group_indices.shape[0])
-        _candidate_idx = np.argmin(_group_norm_distances, axis=-1)
-
-        cluster_idx = _group_indices[_galaxy_idx, _candidate_idx]
-        cluster_distance = _group_distances[_galaxy_idx, _candidate_idx]
+    def match_to_cluster(
+        self, cluster_pos, cluster_radius, n_candidates=32, n_max=2048
+    ):
+        cluster_idx, cluster_norm_dist = periodic_cluster_match(
+            self.Position,
+            cluster_pos,
+            cluster_radius,
+            box_size=self._box_size,
+            n_candidates=n_candidates,
+            n_max=n_max,
+        )
 
         self.ClusterIdx = cluster_idx
-        self.ClusterDistance = cluster_distance
+        self.ClusterNormDistance = cluster_norm_dist
+        self.ClusterDistance = cluster_norm_dist * cluster_radius[cluster_idx]

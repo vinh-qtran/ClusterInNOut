@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.spatial import cKDTree
 
 
 def periodic_difference(pos1, pos2, box_size):
@@ -38,6 +39,52 @@ def periodic_interpolate(pos1, pos2, box_size, n_interp=15):
         ],
         axis=0,
     )
+
+
+def periodic_cluster_match(
+    pos, cluster_pos, cluster_radius, box_size, n_candidates=32, n_max=2048
+):
+    _cluster_tree = cKDTree(cluster_pos, boxsize=box_size)
+
+    _r_max = np.max(cluster_radius)
+
+    _n = pos.shape[0]
+
+    cluster_idx = np.full(_n, -1, dtype=int)
+    cluster_norm_dist = np.full(_n, np.inf, dtype=float)
+
+    _unmatched_idx, _k = np.arange(_n), n_candidates
+    while _unmatched_idx.size and _k <= min(n_max, cluster_pos.shape[0]):
+        _cluster_distances, _cluster_indices = _cluster_tree.query(
+            pos[_unmatched_idx], k=_k
+        )
+        _cluster_norm_distances = _cluster_distances / cluster_radius[_cluster_indices]
+
+        _galaxy_idx = np.arange(_unmatched_idx.size)
+        _candidate_idx = np.argmin(_cluster_norm_distances, axis=-1)
+
+        cluster_idx[_unmatched_idx] = _cluster_indices[_galaxy_idx, _candidate_idx]
+        cluster_norm_dist[_unmatched_idx] = _cluster_norm_distances[
+            _galaxy_idx, _candidate_idx
+        ]
+
+        _matched_mask = (
+            _cluster_distances[:, -1] > cluster_norm_dist[_unmatched_idx] * _r_max
+        )
+
+        _unmatched_idx = _unmatched_idx[~_matched_mask]
+        _k *= 4
+
+    if _unmatched_idx.size:
+        _cluster_distances = periodic_distance(
+            pos[_unmatched_idx][:, None, :], cluster_pos[None, :, :], box_size=box_size
+        )
+        _cluster_norm_distances = _cluster_distances / cluster_radius
+
+        cluster_idx[_unmatched_idx] = np.argmin(_cluster_norm_distances, axis=-1)
+        cluster_norm_dist[_unmatched_idx] = np.min(_cluster_norm_distances, axis=-1)
+
+    return cluster_idx, cluster_norm_dist
 
 
 def periodic_point_line_distance(p, a, b, box_size, atol=1):
@@ -143,11 +190,15 @@ def _closest_point_on_triangle(p, a, b, c, atol=1):
 
 
 def periodic_point_triangle_distance(p, a, b, c, box_size):
+    _b = a + periodic_difference(b, a, box_size)
+    _c = a + periodic_difference(c, a, box_size)
+
     _a_local = periodic_difference(a, p, box_size)
-    _b_local = periodic_difference(b, p, box_size)
-    _c_local = periodic_difference(c, p, box_size)
+    _b_local = _a_local + (_b - a)
+    _c_local = _a_local + (_c - a)
+
     _p_local = np.zeros_like(_a_local)
 
-    _closest_local = _closest_point_on_triangle(_p_local, _a_local, _b_local, _c_local)
+    _closest = _closest_point_on_triangle(_p_local, _a_local, _b_local, _c_local)
 
-    return np.linalg.norm(_closest_local - _p_local, axis=-1)
+    return np.linalg.norm(_closest - _p_local, axis=-1)

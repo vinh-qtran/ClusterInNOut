@@ -6,6 +6,7 @@ from scipy.sparse.csgraph import connected_components
 from scipy.spatial import cKDTree
 
 from clusterinnout.distance_utils import (
+    periodic_cluster_match,
     periodic_distance,
     periodic_interpolate,
     periodic_length,
@@ -20,6 +21,7 @@ class FilamentReader:
         self, ndskl_file, box_size, cluster_dict=None, galaxy_dict=None, r_filament=1e3
     ):
         self._box_size = box_size
+        self._r_filament = r_filament
 
         self._read_ndskl_ascii(ndskl_file)
         self._assign_nodes()
@@ -28,7 +30,7 @@ class FilamentReader:
             self.ClusterNode_Idx, self.Node_ClusterIdx = self._match_node_to_cluster(
                 self.Node_Pos,
                 cluster_dict["Position"],
-                cluster_dict["R200c"],
+                cluster_dict["Rsp"],
             )
 
             self.ClusterFilament_Idx = np.nonzero(
@@ -42,7 +44,6 @@ class FilamentReader:
 
             self.Filament_EffLength = self._get_filament_eff_length(
                 self.Filament_Arc,
-                self.Filament_ClusterIdx,
                 cluster_dict["Position"],
                 cluster_dict["Rsp"],
             )
@@ -56,11 +57,8 @@ class FilamentReader:
 
                 self.Filament_EffMass = self._get_filament_effective_mass(
                     len(self.Filament_Arc),
-                    cluster_dict["Position"],
-                    cluster_dict["Rsp"],
-                    galaxy_dict["Position"],
                     galaxy_dict["Mass"],
-                    galaxy_dict["ClusterIdx"],
+                    galaxy_dict["ClusterNormDistance"],
                     self.Galaxy_FilamentDistance,
                     self.Galaxy_FilamentIdx,
                     r_filament,
@@ -161,73 +159,20 @@ class FilamentReader:
         self.Filament_NodeIdx = np.where(_n >= 0, _cp_to_node[_n], -1)
 
     def _match_node_to_cluster(
-        self, node_pos, cluster_pos, cluster_radius, n_candidates=32
+        self, node_pos, cluster_pos, cluster_radius, n_candidates=32, n_max=2048
     ):
-        _cluster_tree = cKDTree(cluster_pos, boxsize=self._box_size)
+        _all_node_idx = np.arange(node_pos.shape[0])
 
-        _node_cluster_distances, _node_cluster_indices = _cluster_tree.query(
-            node_pos, k=n_candidates
+        _node_cluster_idx, _node_cluster_norm_dist = periodic_cluster_match(
+            node_pos,
+            cluster_pos,
+            cluster_radius,
+            box_size=self._box_size,
+            n_candidates=n_candidates,
+            n_max=n_max,
         )
-        _node_cluster_norm_distances = (
-            _node_cluster_distances / cluster_radius[_node_cluster_indices]
-        )
-
-        _all_node_idx = np.arange(_node_cluster_indices.shape[0])
-        _candidate_cluster_idx = np.argmin(_node_cluster_norm_distances, axis=-1)
-
-        _node_cluster_norm_dist = _node_cluster_norm_distances[
-            _all_node_idx, _candidate_cluster_idx
-        ]
-        _node_cluster_idx = _node_cluster_indices[_all_node_idx, _candidate_cluster_idx]
 
         return _all_node_idx[_node_cluster_norm_dist < 1.0], _node_cluster_idx
-
-    def _get_filament_eff_length(
-        self, filament_arc, filament_cluster_index, cluster_pos, cluster_boundary
-    ):
-        filament_eff_length = np.zeros(len(filament_arc), float)
-
-        for i, _arc in enumerate(filament_arc):
-            _cluster_idx = filament_cluster_index[i]
-            if _cluster_idx < 0:
-                filament_eff_length[i] = periodic_length(_arc, self._box_size)
-                continue
-
-            _cluster_pos = cluster_pos[filament_cluster_index[i]]
-            _cluster_boundary = cluster_boundary[filament_cluster_index[i]]
-
-            _segment_cluster_distance = periodic_distance(
-                _arc, _cluster_pos, self._box_size
-            )
-            _segment_length = periodic_distance(_arc[:-1], _arc[1:], self._box_size)
-
-            _upper_segment_cluster_distance = np.maximum(
-                _segment_cluster_distance[:-1], _segment_cluster_distance[1:]
-            )
-            _lower_segment_cluster_distance = np.minimum(
-                _segment_cluster_distance[:-1], _segment_cluster_distance[1:]
-            )
-
-            _segment_radial_span = (
-                _upper_segment_cluster_distance - _lower_segment_cluster_distance
-            )
-
-            _segment_non_cluster_fraction = np.clip(
-                np.where(
-                    _segment_radial_span > 0,
-                    (_upper_segment_cluster_distance - _cluster_boundary)
-                    / _segment_radial_span,
-                    (_lower_segment_cluster_distance > _cluster_boundary).astype(float),
-                ),
-                0.0,
-                1.0,
-            )
-
-            filament_eff_length[i] = np.sum(
-                _segment_length * _segment_non_cluster_fraction
-            )
-
-        return filament_eff_length
 
     def _get_segment_arrays(self, filament_arc):
         _seg_starts, _seg_ends, _seg_arc_idx = [], [], []
@@ -242,8 +187,35 @@ class FilamentReader:
             np.concatenate(_seg_arc_idx, axis=0),
         )
 
+    def _get_filament_eff_length(
+        self, filament_arc, cluster_pos, cluster_radius, n_candidates=32, n_max=2048
+    ):
+        _seg_starts, _seg_ends, _seg_arc_idx = self._get_segment_arrays(filament_arc)
+
+        _seg_mids = periodic_mean(
+            np.stack([_seg_starts, _seg_ends], axis=1), box_size=self._box_size, axis=1
+        )
+        _seg_lengths = periodic_distance(_seg_starts, _seg_ends, self._box_size)
+
+        _, _seg_cluster_norm_dist = periodic_cluster_match(
+            _seg_mids,
+            cluster_pos,
+            cluster_radius,
+            box_size=self._box_size,
+            n_candidates=n_candidates,
+            n_max=n_max,
+        )
+
+        _seg_out_cluster_mask = _seg_cluster_norm_dist > 1.0
+
+        return np.bincount(
+            _seg_arc_idx[_seg_out_cluster_mask],
+            weights=_seg_lengths[_seg_out_cluster_mask],
+            minlength=len(filament_arc),
+        )
+
     def _get_galaxy_filament_distance(
-        self, filament_arc, galaxy_pos, n_interp=15, n_candidates=32
+        self, filament_arc, galaxy_pos, n_interp=3, n_candidates=16
     ):
         _seg_starts, _seg_ends, _seg_arc_idx = self._get_segment_arrays(filament_arc)
 
@@ -256,7 +228,7 @@ class FilamentReader:
 
         _filament_tree = cKDTree(_interp_points, boxsize=self._box_size)
         _, _candidate_interp_point_indices = _filament_tree.query(
-            galaxy_pos, k=n_candidates
+            galaxy_pos, k=n_candidates * (n_interp + 2)
         )
 
         _candidate_seg_indices = _interp_point_seg_indices[
@@ -286,35 +258,21 @@ class FilamentReader:
     def _get_filament_effective_mass(
         self,
         N_filaments,
-        cluster_pos,
-        cluster_boundary,
-        galaxy_pos,
-        galaxy_masses,
-        galaxy_cluster_indices,
-        galaxy_filament_distances,
-        galaxy_filament_indices,
+        galaxy_mass,
+        galaxy_cluster_norm_dist,
+        galaxy_filament_dist,
+        galaxy_filament_idx,
         r_filament,
     ):
-        _galaxy_in_filament_mask = galaxy_filament_distances < r_filament
-
-        _galaxy_out_cluster_mask = (
-            periodic_distance(
-                galaxy_pos,
-                cluster_pos[galaxy_cluster_indices],
-                self._box_size,
-            )
-            > cluster_boundary[galaxy_cluster_indices]
-        )
-
         _galaxy_mask = np.logical_and(
-            _galaxy_in_filament_mask, _galaxy_out_cluster_mask
+            galaxy_filament_dist < r_filament, galaxy_cluster_norm_dist > 1.0
         )
 
-        _galaxy_mass = galaxy_masses[_galaxy_mask]
-        _galaxy_filament_indices = galaxy_filament_indices[_galaxy_mask]
+        _galaxy_mass = galaxy_mass[_galaxy_mask]
+        _galaxy_filament_idx = galaxy_filament_idx[_galaxy_mask]
 
         return np.bincount(
-            _galaxy_filament_indices,
+            _galaxy_filament_idx,
             weights=_galaxy_mass,
             minlength=N_filaments,
         )
@@ -393,7 +351,7 @@ class WallReader:
         return vertices[triangle_indices] % self._box_size
 
     def _get_galaxy_wall_distances(
-        self, galaxy_pos, dense_midpoints=True, n_candidates=32
+        self, galaxy_pos, dense_midpoints=False, n_candidates=16
     ):
         _n_tri = self.wall_triangles.shape[0]
 
@@ -473,7 +431,9 @@ class WallReader:
         )
 
         _wall_tree = cKDTree(_midpoints, boxsize=self._box_size)
-        _, _candidate_midpoint_indices = _wall_tree.query(galaxy_pos, k=n_candidates)
+        _, _candidate_midpoint_indices = _wall_tree.query(
+            galaxy_pos, k=n_candidates * (16 if dense_midpoints else 7)
+        )
 
         _candidate_triangle_idx = _midpoint_indices[_candidate_midpoint_indices]
 
