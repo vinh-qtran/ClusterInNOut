@@ -359,63 +359,31 @@ class WallReader:
             [
                 self.wall_triangles.reshape(-1, 3),
                 periodic_mean(self.wall_triangles, box_size=self._box_size, axis=1),
+            ]
+            + [
                 periodic_mean(
-                    self.wall_triangles[:, [0, 1]], box_size=self._box_size, axis=1
-                ),
-                periodic_mean(
-                    self.wall_triangles[:, [1, 2]], box_size=self._box_size, axis=1
-                ),
-                periodic_mean(
-                    self.wall_triangles[:, [2, 0]], box_size=self._box_size, axis=1
-                ),
+                    self.wall_triangles[:, _idx], box_size=self._box_size, axis=1
+                )
+                for _idx in [[0, 1], [1, 2], [2, 0]]
             ]
             + (
                 [
                     periodic_mean(
-                        self.wall_triangles[:, [0, 0, 0, 1]],
+                        self.wall_triangles[:, _idx],
                         box_size=self._box_size,
                         axis=1,
-                    ),
-                    periodic_mean(
-                        self.wall_triangles[:, [1, 1, 1, 2]],
-                        box_size=self._box_size,
-                        axis=1,
-                    ),
-                    periodic_mean(
-                        self.wall_triangles[:, [2, 2, 2, 0]],
-                        box_size=self._box_size,
-                        axis=1,
-                    ),
-                    periodic_mean(
-                        self.wall_triangles[:, [0, 1, 1, 1]],
-                        box_size=self._box_size,
-                        axis=1,
-                    ),
-                    periodic_mean(
-                        self.wall_triangles[:, [1, 2, 2, 2]],
-                        box_size=self._box_size,
-                        axis=1,
-                    ),
-                    periodic_mean(
-                        self.wall_triangles[:, [2, 0, 0, 0]],
-                        box_size=self._box_size,
-                        axis=1,
-                    ),
-                    periodic_mean(
-                        self.wall_triangles[:, [0, 1, 2, 0]],
-                        box_size=self._box_size,
-                        axis=1,
-                    ),
-                    periodic_mean(
-                        self.wall_triangles[:, [1, 2, 0, 1]],
-                        box_size=self._box_size,
-                        axis=1,
-                    ),
-                    periodic_mean(
-                        self.wall_triangles[:, [2, 0, 1, 2]],
-                        box_size=self._box_size,
-                        axis=1,
-                    ),
+                    )
+                    for _idx in [
+                        [0, 0, 0, 1],
+                        [1, 1, 1, 2],
+                        [2, 2, 2, 0],
+                        [0, 1, 1, 1],
+                        [1, 2, 2, 2],
+                        [2, 0, 0, 0],
+                        [0, 1, 2, 0],
+                        [1, 2, 0, 1],
+                        [2, 0, 1, 2],
+                    ]
                 ]
                 if dense_midpoints
                 else []

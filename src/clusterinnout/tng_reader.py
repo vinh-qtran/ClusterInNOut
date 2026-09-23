@@ -4,9 +4,8 @@ import h5py
 import numpy as np
 from tqdm import tqdm
 
-from clusterinnout.distance_utils import (
-    periodic_cluster_match,
-)
+from clusterinnout.distance_utils import periodic_cluster_match
+from clusterinnout.splash_back_utils import Diemer20_Rsp_R200m_scaler
 
 
 class BaseReader:
@@ -102,9 +101,24 @@ class GroupReader(BaseReader):
             M200m = f["Group"]["Group_M_Mean200"][:] / self._h
             R200m = f["Group"]["Group_R_Mean200"][:] / self._h
 
-            Rsp = self._Rsp_R200m_scaler * R200m
+            _mask = M200c > self._M200c_min
 
-            _mask = self._M200c_min <= M200c
+            if _mask.sum() == 0:
+                _Rsp_R200m_scaler = np.zeros_like(R200m)
+            elif isinstance(self._Rsp_R200m_scaler, (int, float)):
+                _Rsp_R200m_scaler = self._Rsp_R200m_scaler
+            elif (
+                isinstance(self._Rsp_R200m_scaler, str)
+                and self._Rsp_R200m_scaler == "Diemer20"
+            ):
+                _Rsp_R200m_scaler = Diemer20_Rsp_R200m_scaler(
+                    M200m * 1e10, 1 / self._a - 1
+                )
+            else:
+                _msg = f"Invalid Rsp_R200m_scaler: {self._Rsp_R200m_scaler}"
+                raise ValueError(_msg)
+
+            Rsp = _Rsp_R200m_scaler * R200m
 
         return {
             "Position": Position[_mask],
@@ -117,7 +131,8 @@ class GroupReader(BaseReader):
 
 
 class SubhaloReader(BaseReader):
-    def __init__(self, Mdm_min=6e-1, Mstar_min=3e-2, **kwargs):
+    def __init__(self, M_min=None, Mdm_min=6e-1, Mstar_min=3e-2, **kwargs):
+        self._M_min = M_min
         self._Mdm_min = Mdm_min
         self._Mstar_min = Mstar_min
 
@@ -214,14 +229,18 @@ class SubhaloReader(BaseReader):
             # VmaxRadius
             VmaxRadius = f["Subhalo"]["SubhaloVmaxRad"][:] / self._h
 
-            _mask = np.logical_and(
-                np.logical_and(
-                    f["Subhalo"]["SubhaloMassType"][:, 1] / self._h >= self._Mdm_min,
-                    f["Subhalo"]["SubhaloMassInRadType"][:, 4] / self._h
-                    >= self._Mstar_min,
-                ),
-                f["Subhalo"]["SubhaloFlag"][:] == 1,
-            )
+            if self._M_min is not None:
+                _mask = Mass > self._M_min
+            else:
+                _mask = np.logical_and(
+                    np.logical_and(
+                        f["Subhalo"]["SubhaloMassType"][:, 1] / self._h
+                        >= self._Mdm_min,
+                        f["Subhalo"]["SubhaloMassInRadType"][:, 4] / self._h
+                        >= self._Mstar_min,
+                    ),
+                    f["Subhalo"]["SubhaloFlag"][:] == 1,
+                )
 
             return {
                 "Position": Position[_mask],

@@ -13,35 +13,35 @@ _TNG_COSMO = {
 cosmology.setCosmology("IllustrisTNG", **_TNG_COSMO)
 
 _R_PARAMS = {
-    "a0": 0.3203,
-    "a0_p": 0.6148,
-    "b0": 0.2674,
-    "b0_p": 0.5452,
-    "b_om": 0.1134,
+    "a0": 0.3071,
+    "a0_p": 0.6428,
+    "b0": 0.2508,
+    "b0_p": 0.5074,
+    "b_om": 0.1527,
     "b_om_p": 0.0000,
     "b_om_p2": 0.0000,
-    "b_nu": 0.2080,
-    "b_nu_p": -0.2233,
-    "c0": -0.9596,
-    "c_om": 16.2459,
-    "c_om_p": 0.0039,
-    "c_om_p2": 8.9691,
-    "c_om2": -9.4979,
-    "c_om2_p": -0.0005,
-    "c_om2_p2": 10.6132,
+    "b_nu": 0.1956,
+    "b_nu_p": -0.2128,
+    "c0": -1.2214,
+    "c_om": 17.5374,
+    "c_om_p": 0.0024,
+    "c_om_p2": 9.7115,
+    "c_om2": -10.3158,
+    "c_om2_p": -0.0006,
+    "c_om2_p2": 10.7626,
     "c_nu": 0.0000,
-    "c_nu_p": -0.4511,
-    "c_nu2": -0.0185,
-    "c_nu2_p": 0.0880,
+    "c_nu_p": -0.4735,
+    "c_nu2": -0.0189,
+    "c_nu2_p": 0.0940,
 }
 
 _GAMMA_PARAMS = {
-    "a0": 1.2222,
-    "a1": 0.3515,
-    "b0": -0.2864,
-    "b1": 0.0778,
-    "b2": -0.0562,
-    "b3": 0.0041,
+    "a0": 1.1721,
+    "a1": 0.3255,
+    "b0": -0.2565,
+    "b1": 0.0932,
+    "b2": -0.0571,
+    "b3": 0.0042,
 }
 
 
@@ -57,23 +57,22 @@ def _median_Gamma_dyn(nu200m, z):
     return _A * nu200m + _B * nu200m**1.5
 
 
-def Diemer17_Rsp_R200m_scaler(M200m, z):
+def Diemer20_Rsp_R200m_scaler(M200m, z, p=0.84):
     _nu200m = peaks.peakHeight(M200m, z)
     _Om = _Om_z(z)
 
     _Gamma = _median_Gamma_dyn(_nu200m, z)
-    _p = 0.75
 
     _params = _R_PARAMS
-    _A0 = _params["a0"] + _p * _params["a0_p"]
-    _B0 = _params["b0"] + _p * _params["b0_p"]
-    _B_Om = _params["b_om"] + _params["b_om_p"] * np.exp(_p * _params["b_om_p2"])
-    _B_nu = _params["b_nu"] + _p * _params["b_nu_p"]
+    _A0 = _params["a0"] + p * _params["a0_p"]
+    _B0 = _params["b0"] + p * _params["b0_p"]
+    _B_Om = _params["b_om"] + _params["b_om_p"] * np.exp(p * _params["b_om_p2"])
+    _B_nu = _params["b_nu"] + p * _params["b_nu_p"]
     _C0 = _params["c0"]
-    _C_Om = _params["c_om"] + _params["c_om_p"] * np.exp(_p * _params["c_om_p2"])
-    _C_Om2 = _params["c_om2"] + _params["c_om2_p"] * np.exp(_p * _params["c_om2_p2"])
-    _C_nu = _params["c_nu"] + _p * _params["c_nu_p"]
-    _C_nu2 = _params["c_nu2"] + _p * _params["c_nu2_p"]
+    _C_Om = _params["c_om"] + _params["c_om_p"] * np.exp(p * _params["c_om_p2"])
+    _C_Om2 = _params["c_om2"] + _params["c_om2_p"] * np.exp(p * _params["c_om2_p2"])
+    _C_nu = _params["c_nu"] + p * _params["c_nu_p"]
+    _C_nu2 = _params["c_nu2"] + p * _params["c_nu2_p"]
 
     A = _A0
     B = (_B0 + _B_Om * _Om) * (1.0 + _B_nu * _nu200m)
