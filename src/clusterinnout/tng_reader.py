@@ -112,7 +112,7 @@ class GroupReader(BaseReader):
                 and self._Rsp_R200m_scaler == "Diemer20"
             ):
                 _Rsp_R200m_scaler = Diemer20_Rsp_R200m_scaler(
-                    M200m * 1e10, 1 / self._a - 1
+                    M200m * 1e10 * self._h, z=1 / self._a - 1, p=0.84
                 )
             else:
                 _msg = f"Invalid Rsp_R200m_scaler: {self._Rsp_R200m_scaler}"
@@ -148,10 +148,10 @@ class SubhaloReader(BaseReader):
                     "Spin": np.empty((0, 3)),
                     "DMMass": np.empty(0),
                     "StellarMassRatio": np.empty(0),
-                    "GasFraction": np.empty(0),
                     "sSFR": np.empty(0),
                     "Color": np.empty(0),
                     "StellarMetallicity": np.empty(0),
+                    "GasFraction": np.empty(0),
                     "GasMetallicity": np.empty(0),
                     "DMHalfMassRadius": np.empty(0),
                     "StellarHalfMassRadius": np.empty(0),

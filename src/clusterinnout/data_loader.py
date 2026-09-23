@@ -5,23 +5,16 @@ from torch.utils.data import DataLoader, TensorDataset
 
 
 class GalaxyData:
-    def __init__(self, galaxy_file, cluster_file):
-        self._get_galaxy_data(galaxy_file, cluster_file)
+    def __init__(self, galaxy_file):
+        self._get_galaxy_data(galaxy_file)
 
         self._transform_features()
 
-    def _get_galaxy_data(self, galaxy_file, cluster_file):
-        with h5py.File(cluster_file, "r") as f:
-            _cluster_radius = f["R200m"][:]
-
+    def _get_galaxy_data(self, galaxy_file):
         with h5py.File(galaxy_file, "r") as f:
             for _param in f:
-                if _param not in ["ClusterIdx", "Velocity", "Spin"]:
+                if _param not in ["Velocity", "Spin"]:
                     setattr(self, _param, f[_param][:])
-
-                elif _param == "ClusterIdx":
-                    self.ClusterRadius = _cluster_radius[f[_param][:].astype(int)]
-
                 else:
                     setattr(self, _param, np.linalg.norm(f[_param][:], axis=1))
 
@@ -43,46 +36,46 @@ class GalaxyData:
 
         self.GasHalfMassRadius = np.arcsinh(self.GasHalfMassRadius / 50 - 1)
 
-    def get_strict_masks(self):
-        _cluster_mask = self.ClusterDistance < self.ClusterRadius
+    def get_isotropic_masks(self):
+        _cluster_mask = self.ClusterNormDistance < 0.5
 
         _cluster_outskirts_mask = np.logical_and(
-            self.ClusterDistance > 1 * self.ClusterRadius,
-            self.ClusterDistance < 3 * self.ClusterRadius,
+            self.ClusterNormDistance > 0.5,
+            self.ClusterNormDistance < 2.0,
         )
 
         _filament_mask = np.logical_and(
-            self.ClusterDistance > 3 * self.ClusterRadius,
-            self.FilamentDistance < 1 * self.ClusterRadius,
+            self.ClusterNormDistance > 2.0,
+            self.FilamentNormDistance < 0.5,
         )
 
         _filament_outskirts_mask = np.logical_and(
-            self.ClusterDistance > 3 * self.ClusterRadius,
+            self.ClusterNormDistance > 2.0,
             np.logical_and(
-                self.FilamentDistance > 1 * self.ClusterRadius,
-                self.FilamentDistance < 3 * self.ClusterRadius,
+                self.FilamentNormDistance > 0.5,
+                self.FilamentNormDistance < 2.0,
             ),
         )
 
         _wall_mask = np.logical_and(
             np.logical_and(
-                self.ClusterDistance > 3 * self.ClusterRadius,
-                self.FilamentDistance > 3 * self.ClusterRadius,
+                self.ClusterNormDistance > 2.0,
+                self.FilamentNormDistance > 2.0,
             ),
             self.WallDistance < 1e3,
         )
 
         _void_mask = np.logical_and(
             np.logical_and(
-                self.ClusterDistance > 3 * self.ClusterRadius,
-                self.FilamentDistance > 3 * self.ClusterRadius,
+                self.ClusterNormDistance > 2.0,
+                self.FilamentNormDistance > 2.0,
             ),
             self.WallDistance > 3e3,
         )
 
         _wall_void_mask = np.logical_and(
-            self.ClusterDistance > 3 * self.ClusterRadius,
-            self.FilamentDistance > 3 * self.ClusterRadius,
+            self.ClusterNormDistance > 2.0,
+            self.FilamentNormDistance > 2.0,
         )
 
         return {
@@ -95,61 +88,8 @@ class GalaxyData:
             "wall_void": _wall_void_mask,
         }
 
-    def get_extra_strict_masks(self):
-        _cluster_mask = self.ClusterDistance < 0.5 * self.ClusterRadius
-
-        _filament_mask = np.logical_and(
-            self.ClusterDistance > 5 * self.ClusterRadius,
-            self.FilamentDistance < 0.5 * self.ClusterRadius,
-        )
-
-        _wall_void_mask = np.logical_and(
-            self.ClusterDistance > 5 * self.ClusterRadius,
-            self.FilamentDistance > 5 * self.ClusterRadius,
-        )
-
-        return {
-            "cluster": _cluster_mask,
-            "filament": _filament_mask,
-            "wall_void": _wall_void_mask,
-        }
-
-    def get_inclusive_masks(self):
-        _cluster_mask = self.ClusterDistance < 2 * self.ClusterRadius
-
-        _filament_mask = np.logical_and(
-            ~_cluster_mask,
-            self.FilamentDistance < 2 * self.ClusterRadius,
-        )
-
-        _wall_mask = np.logical_and(
-            np.logical_and(
-                ~_cluster_mask,
-                ~_filament_mask,
-            ),
-            self.WallDistance < 2e3,
-        )
-
-        _void_mask = np.logical_and(
-            np.logical_and(
-                ~_cluster_mask,
-                ~_filament_mask,
-            ),
-            ~_wall_mask,
-        )
-
-        _wall_void_mask = np.logical_and(
-            ~_cluster_mask,
-            ~_filament_mask,
-        )
-
-        return {
-            "cluster": _cluster_mask,
-            "filament": _filament_mask,
-            "wall": _wall_mask,
-            "void": _void_mask,
-            "wall_void": _wall_void_mask,
-        }
+    def get_tidal_masks(self):
+        pass
 
     def get_train_val_test_masks(self, train_frac=0.7, val_frac=0.15, box_size=302627):
         _train_mask = np.logical_or(
