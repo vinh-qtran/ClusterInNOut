@@ -19,8 +19,17 @@ class GalaxyData:
                     setattr(self, _param, np.linalg.norm(f[_param][:], axis=1))
 
     def _transform_features(self):
+        _quenched_mask = self.sSFR == 0
+
+        self.Quenched = _quenched_mask.astype(int)
+        self.sSFR[_quenched_mask] = 10 ** (-4.5)
+
+        self.GasDepleted = (self.GasFraction == 0).astype(int)
+        self.GasHalfMassRadius[self.GasHalfMassRadius == 0] = 10 ** (-0.25)
+
         for _param in [
             "StellarMassRatio",
+            "sSFR",
             "VelocityDispersion",
             "Vmax",
             "VmaxRadius",
@@ -29,12 +38,9 @@ class GalaxyData:
             "DMMass",
             "DMHalfMassRadius",
             "StellarHalfMassRadius",
+            "GasHalfMassRadius",
         ]:
             setattr(self, _param, np.log10(getattr(self, _param)))
-
-        self.sSFR = np.arcsinh(self.sSFR - 1)
-
-        self.GasHalfMassRadius = np.arcsinh(self.GasHalfMassRadius / 50 - 1)
 
     def get_isotropic_masks(self):
         _cluster_mask = self.ClusterNormDistance < 0.5
@@ -91,27 +97,30 @@ class GalaxyData:
     def get_tidal_masks(self):
         pass
 
-    def get_train_val_test_masks(self, train_frac=0.7, val_frac=0.15, box_size=302627):
+    def get_train_val_test_masks(
+        self, off_set=0, train_frac=0.7, val_frac=0.15, box_size=302627
+    ):
+        _position = (self.Position + off_set) % box_size
+
         _train_mask = np.logical_or(
-            self.Position[:, 0] < (train_frac / 2) * box_size,
-            self.Position[:, 0] > (1 - train_frac / 2) * box_size,
+            _position[:, 0] < (train_frac / 2) * box_size,
+            _position[:, 0] > (1 - train_frac / 2) * box_size,
         )
 
         _val_mask = np.logical_or(
             np.logical_and(
-                self.Position[:, 0] > (train_frac / 2) * box_size + 2e3,
-                self.Position[:, 0] < (train_frac / 2 + val_frac / 2) * box_size + 2e3,
+                _position[:, 0] > (train_frac / 2) * box_size + 2e3,
+                _position[:, 0] < (train_frac / 2 + val_frac / 2) * box_size + 2e3,
             ),
             np.logical_and(
-                self.Position[:, 0] < (1 - train_frac / 2) * box_size - 2e3,
-                self.Position[:, 0]
-                > (1 - train_frac / 2 - val_frac / 2) * box_size - 2e3,
+                _position[:, 0] < (1 - train_frac / 2) * box_size - 2e3,
+                _position[:, 0] > (1 - train_frac / 2 - val_frac / 2) * box_size - 2e3,
             ),
         )
 
         _test_mask = np.logical_and(
-            self.Position[:, 0] > (train_frac / 2 + val_frac / 2) * box_size + 4e3,
-            self.Position[:, 0] < (1 - train_frac / 2 - val_frac / 2) * box_size - 4e3,
+            _position[:, 0] > (train_frac / 2 + val_frac / 2) * box_size + 4e3,
+            _position[:, 0] < (1 - train_frac / 2 - val_frac / 2) * box_size - 4e3,
         )
 
         return {
@@ -152,7 +161,7 @@ class DataLoaderBuilder:
         self._batch_size = batch_size
         self._num_workers = num_workers
 
-    def get_loaders(self):
+    def get_train_val_test_loaders(self):
         train_loader = DataLoader(
             self._train_dataset,
             batch_size=self._batch_size,
@@ -175,3 +184,15 @@ class DataLoaderBuilder:
         )
 
         return train_loader, val_loader, test_loader
+
+    def get_input_loader(self, features):
+        _data_set = TensorDataset(
+            torch.as_tensor(features, dtype=torch.float32),
+        )
+
+        return DataLoader(
+            _data_set,
+            batch_size=self._batch_size,
+            shuffle=False,
+            num_workers=self._num_workers,
+        )

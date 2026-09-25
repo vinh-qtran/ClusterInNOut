@@ -1,7 +1,10 @@
 import json
 import os
 
+import numpy as np
 import torch
+from scipy.optimize import minimize_scalar
+from sklearn.metrics import roc_auc_score, roc_curve
 from torch import nn, optim
 from torch.utils.data import DataLoader
 from torchmetrics import Accuracy, ConfusionMatrix
@@ -31,12 +34,16 @@ class SupervisedTraining:
 
         self._model = model.to(self._device, dtype=torch.float32)
 
-        # --- class weighting ---
-        if class_weights is not None:
-            class_weights = torch.as_tensor(class_weights, dtype=torch.float32).to(
-                self._device
+        # --- class weighting (kept on the object for the equal-mix metrics) ---
+        self._class_weights = (
+            np.array([1.0] * num_classes, dtype=np.float32)
+            if class_weights is None
+            else np.asarray(class_weights, dtype=np.float32)
+        )
+        if self._class_weights is not None:
+            criterion = criterion.__class__(
+                weight=torch.as_tensor(self._class_weights, dtype=torch.float32)
             )
-            criterion = criterion.__class__(weight=class_weights)
 
         self._criterion = criterion.to(self._device, dtype=torch.float32)
 
@@ -67,6 +74,9 @@ class SupervisedTraining:
             task="multiclass", num_classes=self._num_classes
         ).to(self._device)
 
+    # ------------------------------------------------------------------------------
+    # training
+    # ------------------------------------------------------------------------------
     def _get_accuracy(self, outputs, targets):
         _preds = torch.argmax(outputs, dim=1)
         return self._accuracy_metric(_preds, targets).item()
@@ -162,71 +172,197 @@ class SupervisedTraining:
                 f,
             )
 
-    def test(self, test_loader, model_path, out_path=None):
+    # ------------------------------------------------------------------------------
+    # helpers
+    # ------------------------------------------------------------------------------
+    def _load(self, model_path):
         _checkpoint = torch.load(model_path, map_location=self._device)
         self._model.load_state_dict(_checkpoint["model_state_dict"])
+        self._model.eval()
+
+    def _collect_logits(self, loader):
+        _logits, _targets = [], []
+        with torch.no_grad():
+            for _batch in loader:
+                if isinstance(_batch, (list, tuple)):
+                    _inputs = _batch[0]
+                    if len(_batch) > 1:
+                        _targets.append(_batch[1].cpu())
+                else:
+                    _inputs = _batch
+                _logits.append(self._model(_inputs.to(self._device)).cpu())
+        return torch.cat(_logits), (torch.cat(_targets) if _targets else None)
+
+    def _to_probabilities(self, logits, temperature=1.0):
+        return torch.softmax(logits / temperature, dim=1).numpy()
+
+    # ------------------------------------------------------------------------------
+    # calibration
+    # ------------------------------------------------------------------------------
+    def fit_temperature(self, model_path, out_path=None, bounds=(0.01, 100.0)):
+        self._load(model_path)
+
+        _logits, _targets = self._collect_logits(self._val_loader)
+        _nll = nn.CrossEntropyLoss(
+            weight=torch.as_tensor(self._class_weights, dtype=torch.float32)
+        )
+
+        def _objective(log_t):
+            return _nll(_logits / np.exp(log_t), _targets).item()
+
+        _res = minimize_scalar(_objective, bounds=np.log(bounds), method="bounded")
+        temperature = float(np.exp(_res.x))
+
+        if out_path is not None:
+            with open(f"{out_path}/temperature.json", "w") as f:  # noqa: PTH123
+                json.dump(
+                    {
+                        "temperature": temperature,
+                        "val_log_loss": _objective(0.0),
+                        "val_log_loss_fitted": _objective(_res.x),
+                    },
+                    f,
+                )
+
+        return temperature
+
+    # ------------------------------------------------------------------------------
+    # equal-mix metrics
+    # ------------------------------------------------------------------------------
+    def log_loss_report(self, labels, probs):
+        """Equal-mix log-loss: class-weighted mean of -ln(probability given to the truth).
+
+        log_loss   : lower is better, 0 = perfect
+        baseline   : ln K, the score of a model that ignores the features (1/K each)
+        info_bits  : (baseline - log_loss) / ln 2, environment information captured
+        pseudo_R2  : 1 - log_loss / baseline, fraction of the uncertainty removed
+        typical_p  : exp(-log_loss), typical probability given to the right answer
+        per_class  : mean -ln p_true within each true class
+        """
+        labels = np.asarray(labels)
+        _w = self._class_weights[labels]
+        _nll = -np.log(np.clip(probs[np.arange(len(labels)), labels], 1e-12, 1.0))
+
+        _ll = float(np.average(_nll, weights=_w))
+        _base = float(np.log(self._num_classes))
+
+        return {
+            "log_loss": _ll,
+            "baseline": _base,
+            "pseudo_R2": 1 - _ll / _base,
+            "per_class": {
+                k: float(_nll[labels == k].mean()) for k in range(self._num_classes)
+            },
+        }
+
+    def ovr_auc(self, labels, probs):
+        """One-vs-rest AUC per class: probability that a random true-k galaxy gets a higher
+        P(k) than a random non-k galaxy (other classes weighted equally). 0.5 = no
+        information, 1 = perfect ranking."""
+        labels = np.asarray(labels)
+        _w = self._class_weights[labels]
+
+        aucs = {}
+        roc_curves = {}
+        for k in range(self._num_classes):
+            _is_k = (labels == k).astype(int)
+            aucs[k] = float(roc_auc_score(_is_k, probs[:, k], sample_weight=_w))
+
+            _fpr, _tpr, _ = roc_curve(_is_k, probs[:, k], sample_weight=_w)
+            roc_curves[k] = (_fpr.tolist(), _tpr.tolist())
+
+        return {
+            "aucs": aucs,
+            "roc_curves": roc_curves,
+        }
+
+    # ------------------------------------------------------------------------------
+    # evaluation / prediction
+    # ------------------------------------------------------------------------------
+    def test(self, test_loader, model_path, temperature=1.0, out_path=None):
+        """Confusion matrix (argmax of the equal-mix probabilities, row-normalised =
+        completeness), equal-mix log-loss and one-vs-rest AUC on the test set.
+
+        Returns (labels, probabilities) for plotting."""
+        self._load(model_path)
+
+        _logits, _targets = self._collect_logits(test_loader)
 
         _confusion_matrix_metric = ConfusionMatrix(
             task="multiclass",
             num_classes=self._num_classes,
             normalize="true",
-        ).to(self._device)
+        )
+        _confusion_matrix_metric.update(_logits, _targets)
+        confusion_matrix = _confusion_matrix_metric.compute().numpy()
 
-        self._model.eval()
-        with torch.no_grad():
-            for _inputs, _targets in test_loader:
-                _inputs = _inputs.to(self._device)
-                _targets = _targets.to(self._device)
-
-                _outputs = self._model(_inputs)
-
-                _confusion_matrix_metric.update(_outputs, _targets)
-
-        confusion_matrix = _confusion_matrix_metric.compute().cpu().numpy()
+        labels = _targets.numpy()
+        probs = self._to_probabilities(_logits, temperature=temperature)
 
         if out_path is not None:
-            with open(f"{out_path}/test_results.json", "w") as f:  # noqa: PTH123
-                json.dump(confusion_matrix.tolist(), f)
+            with open(f"{out_path}/test_metrics.json", "w") as f:  # noqa: PTH123
+                json.dump(
+                    {
+                        "temperature": temperature,
+                        "confusion_matrix": confusion_matrix.tolist(),
+                        "log_loss": self.log_loss_report(labels, probs),
+                        "ovr_auc": self.ovr_auc(labels, probs),
+                    },
+                    f,
+                )
 
+        return labels, probs
+
+    def predict(self, input_loader, model_path, temperature=1.0):
+        """Equal-mix probabilities for any loader (inputs only, or (inputs, labels))."""
+        self._load(model_path)
+        _logits, _ = self._collect_logits(input_loader)
+        return self._to_probabilities(_logits, temperature=temperature)
+
+    # ------------------------------------------------------------------------------
+    # feature importance
+    # ------------------------------------------------------------------------------
     def check_feature_importance(
         self, test_loader, model_path, out_path=None, n_repeats=1, seed=42
     ):
         _checkpoint = torch.load(model_path, map_location=self._device)
         self._model.load_state_dict(_checkpoint["model_state_dict"])
+        self._model.eval()
 
-        torch.manual_seed(seed)
+        # Full test set, not batch by batch
+        _features, _labels = test_loader.dataset.tensors
+        _n_samples, _n_features = _features.shape
+        _batch_size = test_loader.batch_size
+
+        _generator = torch.Generator().manual_seed(seed)
 
         accuracy_matrix = []
-
-        _n_features = test_loader.dataset.tensors[0].shape[1]
 
         for i in tqdm(range(_n_features), desc="Feature Importance"):
             _avg_per_class_accuracy = 0
 
             for _ in range(n_repeats):
+                _perm = torch.randperm(_n_samples, generator=_generator)
+                _permuted = _features.clone()
+                _permuted[:, i] = _features[_perm, i]
+
                 _per_class_metric = Accuracy(
-                    task="multiclass",
-                    num_classes=self._num_classes,
-                    average="none",
+                    task="multiclass", num_classes=self._num_classes, average="none"
                 ).to(self._device)
 
-                self._model.eval()
                 with torch.no_grad():
-                    for _inputs, _targets in test_loader:
-                        _inputs = _inputs.to(self._device).clone()
-                        _targets = _targets.to(self._device)
+                    for _start in range(0, _n_samples, _batch_size):
+                        _inputs = _permuted[_start : _start + _batch_size].to(
+                            self._device
+                        )
+                        _targets = _labels[_start : _start + _batch_size].to(
+                            self._device
+                        )
+                        _per_class_metric.update(self._model(_inputs), _targets)
 
-                        _inputs[:, i] = _inputs[torch.randperm(_inputs.size(0)), i]
-
-                        _outputs = self._model(_inputs)
-
-                        _per_class_metric.update(_outputs, _targets)
-
-                _per_class_accuracy = _per_class_metric.compute().cpu().numpy()
-                _avg_per_class_accuracy += _per_class_accuracy
+                _avg_per_class_accuracy += _per_class_metric.compute().cpu().numpy()
 
             _avg_per_class_accuracy /= n_repeats
-
             accuracy_matrix.append(_avg_per_class_accuracy.tolist())
 
         if out_path is not None:
