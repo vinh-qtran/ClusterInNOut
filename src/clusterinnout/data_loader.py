@@ -95,7 +95,55 @@ class GalaxyData:
         }
 
     def get_tidal_masks(self):
-        pass
+        _core_cluster_mask = self.ClusterNormDistance < 0.5
+        _core_filament_mask = np.logical_and(
+            self.FilamentNormDistance < 0.5,
+            self.ClusterNormDistance > 0.5,
+        )
+        _mid_mask = np.logical_or(
+            np.logical_and(
+                self.ClusterNormDistance > 0.5, self.ClusterNormDistance < 1.0
+            ),
+            np.logical_and(
+                np.logical_and(
+                    self.FilamentNormDistance > 0.5, self.FilamentNormDistance < 1.0
+                ),
+                self.ClusterNormDistance > 0.5,
+            ),
+        )
+
+        _tidal_ratio = self.ClusterTidal / self.FilamentTidal
+
+        _cluster_mask = np.logical_or(
+            _core_cluster_mask, np.logical_and(_mid_mask, _tidal_ratio > 1.0)
+        )
+
+        _filament_mask = np.logical_or(
+            _core_filament_mask, np.logical_and(_mid_mask, _tidal_ratio < 1.0)
+        )
+
+        _wall_mask = np.logical_and(
+            np.logical_and(
+                self.ClusterNormDistance > 2.0,
+                self.FilamentNormDistance > 2.0,
+            ),
+            self.WallDistance < 1e3,
+        )
+
+        _void_mask = np.logical_and(
+            np.logical_and(
+                self.ClusterNormDistance > 2.0,
+                self.FilamentNormDistance > 2.0,
+            ),
+            self.WallDistance > 3e3,
+        )
+
+        return {
+            "cluster": _cluster_mask,
+            "filament": _filament_mask,
+            "wall": _wall_mask,
+            "void": _void_mask,
+        }
 
     def get_train_val_test_masks(
         self, off_set=0, train_frac=0.7, val_frac=0.15, box_size=302627
