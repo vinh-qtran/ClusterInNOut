@@ -2,10 +2,30 @@ import os
 
 import h5py
 import numpy as np
+from colossus.cosmology import cosmology
+from colossus.halo import splashback
+from colossus.lss import peaks
 from tqdm import tqdm
 
 from clusterinnout.distance_utils import periodic_cluster_match
-from clusterinnout.splash_back_utils import Diemer20_Rsp_R200m_scaler
+
+cosmology.setCosmology("planck15")
+
+
+def Diemer20_Rsp_R200m_scaler(M200m, z, p=0.84, nu_max=5.0):
+    _nu200m = np.clip(np.atleast_1d(peaks.peakHeight(M200m, z)), 0.0, nu_max)
+
+    _rsp_r200m, _valid = splashback.splashbackModel(
+        "RspR200m",
+        nu200m=_nu200m,
+        z=z,
+        model="diemer20",
+        rspdef=f"sp-apr-p{round(p * 100):02d}",
+    )
+
+    out = np.full(_nu200m.shape, np.nan)
+    out[_valid] = _rsp_r200m
+    return out if np.ndim(M200m) else out[0]
 
 
 class BaseReader:
