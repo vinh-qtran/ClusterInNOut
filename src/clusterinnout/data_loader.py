@@ -43,19 +43,19 @@ class GalaxyData:
             setattr(self, _param, np.log10(getattr(self, _param)))
 
     def get_isotropic_masks(self):
-        _cluster_mask = self.ClusterNormDistance < 0.5
+        cluster_mask = self.ClusterNormDistance < 0.5
 
-        _cluster_outskirts_mask = np.logical_and(
+        cluster_outskirt_mask = np.logical_and(
             self.ClusterNormDistance > 0.5,
             self.ClusterNormDistance < 2.0,
         )
 
-        _filament_mask = np.logical_and(
+        filament_mask = np.logical_and(
             self.ClusterNormDistance > 2.0,
             self.FilamentNormDistance < 0.5,
         )
 
-        _filament_outskirts_mask = np.logical_and(
+        filament_outskirt_mask = np.logical_and(
             self.ClusterNormDistance > 2.0,
             np.logical_and(
                 self.FilamentNormDistance > 0.5,
@@ -63,7 +63,7 @@ class GalaxyData:
             ),
         )
 
-        _wall_mask = np.logical_and(
+        wall_mask = np.logical_and(
             np.logical_and(
                 self.ClusterNormDistance > 2.0,
                 self.FilamentNormDistance > 2.0,
@@ -71,7 +71,7 @@ class GalaxyData:
             self.WallDistance < 1e3,
         )
 
-        _void_mask = np.logical_and(
+        void_mask = np.logical_and(
             np.logical_and(
                 self.ClusterNormDistance > 2.0,
                 self.FilamentNormDistance > 2.0,
@@ -79,70 +79,56 @@ class GalaxyData:
             self.WallDistance > 3e3,
         )
 
-        _wall_void_mask = np.logical_and(
+        wall_void_mask = np.logical_and(
             self.ClusterNormDistance > 2.0,
             self.FilamentNormDistance > 2.0,
         )
 
         return {
-            "cluster": _cluster_mask,
-            "cluster_outskirts": _cluster_outskirts_mask,
-            "filament": _filament_mask,
-            "filament_outskirts": _filament_outskirts_mask,
-            "wall": _wall_mask,
-            "void": _void_mask,
-            "wall_void": _wall_void_mask,
+            "cluster": cluster_mask,
+            "cluster_outskirt": cluster_outskirt_mask,
+            "filament": filament_mask,
+            "filament_outskirt": filament_outskirt_mask,
+            "wall": wall_mask,
+            "void": void_mask,
+            "wall_void": wall_void_mask,
         }
 
-    def get_tidal_masks(self):
-        _core_cluster_mask = self.ClusterNormDistance < 0.5
-        _core_filament_mask = np.logical_and(
-            self.FilamentNormDistance < 0.5,
-            self.ClusterNormDistance > 0.5,
+    def get_tidal_masks(self, tidal_threshold=3.0):
+        _cluster_inner_outskirt_mask = np.logical_and(
+            self.ClusterNormDistance > 0.5, self.ClusterNormDistance < 1.0
         )
-        _mid_mask = np.logical_or(
+        _filament_extended_outskirt_mask = np.logical_and(
+            self.ClusterNormDistance > 2.0,
             np.logical_and(
-                self.ClusterNormDistance > 0.5, self.ClusterNormDistance < 1.0
+                self.FilamentNormDistance > 0.5, self.FilamentNormDistance < 2.0
             ),
-            np.logical_and(
-                np.logical_and(
-                    self.FilamentNormDistance > 0.5, self.FilamentNormDistance < 1.0
-                ),
-                self.ClusterNormDistance > 0.5,
-            ),
+        )
+
+        _shared_outskirt_mask = np.logical_and(
+            self.ClusterNormDistance > 1.0, self.ClusterNormDistance < 2.0
         )
 
         _tidal_ratio = self.ClusterTidal / self.FilamentTidal
 
-        _cluster_mask = np.logical_or(
-            _core_cluster_mask, np.logical_and(_mid_mask, _tidal_ratio > 1.0)
+        cluster_outskirt_mask = np.logical_or(
+            _cluster_inner_outskirt_mask,
+            np.logical_and(_shared_outskirt_mask, _tidal_ratio > tidal_threshold),
         )
 
-        _filament_mask = np.logical_or(
-            _core_filament_mask, np.logical_and(_mid_mask, _tidal_ratio < 1.0)
-        )
-
-        _wall_mask = np.logical_and(
+        filament_outskirt_mask = np.logical_or(
+            _filament_extended_outskirt_mask,
             np.logical_and(
-                self.ClusterNormDistance > 2.0,
-                self.FilamentNormDistance > 2.0,
+                np.logical_and(
+                    _shared_outskirt_mask, _tidal_ratio < 1 / tidal_threshold
+                ),
+                self.FilamentNormDistance < 2.0,
             ),
-            self.WallDistance < 1e3,
-        )
-
-        _void_mask = np.logical_and(
-            np.logical_and(
-                self.ClusterNormDistance > 2.0,
-                self.FilamentNormDistance > 2.0,
-            ),
-            self.WallDistance > 3e3,
         )
 
         return {
-            "cluster": _cluster_mask,
-            "filament": _filament_mask,
-            "wall": _wall_mask,
-            "void": _void_mask,
+            "cluster_outskirt": cluster_outskirt_mask,
+            "filament_outskirt": filament_outskirt_mask,
         }
 
     def get_train_val_test_masks(

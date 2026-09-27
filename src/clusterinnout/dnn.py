@@ -40,10 +40,9 @@ class SupervisedTraining:
             if class_weights is None
             else np.asarray(class_weights, dtype=np.float32)
         )
-        if self._class_weights is not None:
-            criterion = criterion.__class__(
-                weight=torch.as_tensor(self._class_weights, dtype=torch.float32)
-            )
+        criterion = criterion.__class__(
+            weight=torch.as_tensor(self._class_weights, dtype=torch.float32)
+        )
 
         self._criterion = criterion.to(self._device, dtype=torch.float32)
 
@@ -269,7 +268,8 @@ class SupervisedTraining:
             aucs[k] = float(roc_auc_score(_is_k, probs[:, k], sample_weight=_w))
 
             _fpr, _tpr, _ = roc_curve(_is_k, probs[:, k], sample_weight=_w)
-            roc_curves[k] = (_fpr.tolist(), _tpr.tolist())
+            _grid = np.linspace(0.0, 1.0, 201)
+            roc_curves[k] = (_grid.tolist(), np.interp(_grid, _fpr, _tpr).tolist())
 
         return {
             "aucs": aucs,
@@ -323,51 +323,113 @@ class SupervisedTraining:
     # feature importance
     # ------------------------------------------------------------------------------
     def check_feature_importance(
-        self, test_loader, model_path, out_path=None, n_repeats=1, seed=42
+        self,
+        test_loader,
+        model_path,
+        feature_groups=None,
+        temperature=1.0,
+        out_path=None,
+        n_repeats=10,
+        seed=42,
     ):
-        _checkpoint = torch.load(model_path, map_location=self._device)
-        self._model.load_state_dict(_checkpoint["model_state_dict"])
-        self._model.eval()
+        """Grouped permutation importance, measured as the increase in equal-mix log-loss.
 
-        # Full test set, not batch by batch
+        feature_groups : {name: [column indices]}. All columns of a group are shuffled
+                         with the SAME permutation (keep correlated features, e.g. a flag
+                         and its continuous partner, in one group). Default: one group
+                         per column, named by its index.
+
+        Per group (averaged over n_repeats):
+          delta_log_loss      increase of the equal-mix log-loss (nats); + std over repeats
+          delta_bits          delta_log_loss / ln 2
+          delta_over_info     delta_log_loss / (ln K - baseline log-loss). For ranking only:
+                              it can exceed 1, because a confident model fed shuffled
+                              galaxies can become confidently wrong.
+          per_class_delta     increase of the mean -ln p_true within each true class
+          per_class_recall    completeness of each class after shuffling
+        """
+        self._load(model_path)
+
         _features, _labels = test_loader.dataset.tensors
+        _features, _labels = _features.cpu(), _labels.cpu()
         _n_samples, _n_features = _features.shape
-        _batch_size = test_loader.batch_size
+        _batch_size = test_loader.batch_size or 1024
+
+        if feature_groups is None:
+            feature_groups = {str(i): [i] for i in range(_n_features)}
+
+        _labels_np = _labels.numpy()
+        _w = self._class_weights[_labels_np]
+        _log_k = float(np.log(self._num_classes))
+
+        def _evaluate(features):
+            # logits -> (equal-mix log-loss, per-class mean nll, per-class recall)
+            _logits, _ = self._collect_logits(
+                DataLoader(features, batch_size=_batch_size)
+            )
+            _nll = -torch.log_softmax(_logits / temperature, dim=1)[
+                torch.arange(_n_samples), _labels
+            ].numpy()
+            _pred = _logits.argmax(dim=1).numpy()
+            _per_class = np.array(
+                [_nll[_labels_np == k].mean() for k in range(self._num_classes)]
+            )
+            _recall = np.array(
+                [np.mean(_pred[_labels_np == k] == k) for k in range(self._num_classes)]
+            )
+            return float(np.average(_nll, weights=_w)), _per_class, _recall
+
+        _base_ll, _base_per_class, _base_recall = _evaluate(_features)
+        _info = _log_k - _base_ll
 
         _generator = torch.Generator().manual_seed(seed)
+        groups = {}
 
-        accuracy_matrix = []
-
-        for i in tqdm(range(_n_features), desc="Feature Importance"):
-            _avg_per_class_accuracy = 0
+        for _name, _cols in tqdm(feature_groups.items(), desc="Feature Importance"):
+            _cols = list(_cols)
+            _d_ll, _d_per_class, _recall = [], [], []
 
             for _ in range(n_repeats):
                 _perm = torch.randperm(_n_samples, generator=_generator)
                 _permuted = _features.clone()
-                _permuted[:, i] = _features[_perm, i]
+                _permuted[:, _cols] = _features[_perm][:, _cols]
 
-                _per_class_metric = Accuracy(
-                    task="multiclass", num_classes=self._num_classes, average="none"
-                ).to(self._device)
+                _ll, _per_class, _rec = _evaluate(_permuted)
+                _d_ll.append(_ll - _base_ll)
+                _d_per_class.append(_per_class - _base_per_class)
+                _recall.append(_rec)
 
-                with torch.no_grad():
-                    for _start in range(0, _n_samples, _batch_size):
-                        _inputs = _permuted[_start : _start + _batch_size].to(
-                            self._device
-                        )
-                        _targets = _labels[_start : _start + _batch_size].to(
-                            self._device
-                        )
-                        _per_class_metric.update(self._model(_inputs), _targets)
+            _d_ll = np.array(_d_ll)
+            groups[_name] = {
+                "columns": _cols,
+                "delta_log_loss": float(_d_ll.mean()),
+                "delta_log_loss_std": float(_d_ll.std(ddof=1))
+                if n_repeats > 1
+                else 0.0,
+                "delta_over_info": float(_d_ll.mean() / _info)
+                if _info > 0
+                else float("nan"),
+                "per_class_delta": np.mean(_d_per_class, axis=0).tolist(),
+                "per_class_recall": np.mean(_recall, axis=0).tolist(),
+            }
 
-                _avg_per_class_accuracy += _per_class_metric.compute().cpu().numpy()
-
-            _avg_per_class_accuracy /= n_repeats
-            accuracy_matrix.append(_avg_per_class_accuracy.tolist())
+        output = {
+            "temperature": temperature,
+            "n_repeats": n_repeats,
+            "baseline": {
+                "log_loss": _base_ll,
+                "info_bits": _info / np.log(2),
+                "per_class": _base_per_class.tolist(),
+                "per_class_recall": _base_recall.tolist(),
+            },
+            "groups": groups,
+        }
 
         if out_path is not None:
             with open(f"{out_path}/feature_importance.json", "w") as f:  # noqa: PTH123
-                json.dump(accuracy_matrix, f)
+                json.dump(output, f, indent=2)
+
+        return output
 
 
 class MLP(nn.Module):

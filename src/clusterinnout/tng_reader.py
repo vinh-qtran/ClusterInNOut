@@ -103,9 +103,9 @@ class GroupReader(BaseReader):
 
             _mask = M200c > self._M200c_min
 
-            if _mask.sum() == 0:
-                _Rsp_R200m_scaler = np.zeros_like(R200m)
-            elif isinstance(self._Rsp_R200m_scaler, (int, float)):
+            M200m[~_mask] = 1
+
+            if isinstance(self._Rsp_R200m_scaler, (int, float)):
                 _Rsp_R200m_scaler = self._Rsp_R200m_scaler
             elif (
                 isinstance(self._Rsp_R200m_scaler, str)
@@ -230,7 +230,10 @@ class SubhaloReader(BaseReader):
             VmaxRadius = f["Subhalo"]["SubhaloVmaxRad"][:] / self._h
 
             if self._M_min is not None:
-                _mask = Mass > self._M_min
+                _mask = np.logical_and(
+                    Mass > self._M_min,
+                    f["Subhalo"]["SubhaloFlag"][:] == 1,
+                )
             else:
                 _mask = np.logical_and(
                     np.logical_and(
