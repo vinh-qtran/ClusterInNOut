@@ -3,10 +3,20 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
+from clusterinnout.label_utils import EnvironmentMask
+
 
 class GalaxyData:
-    def __init__(self, galaxy_file):
+    def __init__(self, galaxy_file, **label_kwargs):
         self._get_galaxy_data(galaxy_file)
+
+        self._env_mask = EnvironmentMask(
+            cluster_norm_distance=self.ClusterNormDistance,
+            filament_norm_distance=self.FilamentNormDistance,
+            wall_distance=self.WallDistance,
+            tidal_ratio=self.ClusterTidal / self.FilamentTidal,
+            **label_kwargs,
+        )
 
         self._transform_features()
 
@@ -43,93 +53,10 @@ class GalaxyData:
             setattr(self, _param, np.log10(getattr(self, _param)))
 
     def get_isotropic_masks(self):
-        cluster_mask = self.ClusterNormDistance < 0.5
+        return self._env_mask.get_isotropic_masks()
 
-        cluster_outskirt_mask = np.logical_and(
-            self.ClusterNormDistance > 0.5,
-            self.ClusterNormDistance < 2.0,
-        )
-
-        filament_mask = np.logical_and(
-            self.ClusterNormDistance > 2.0,
-            self.FilamentNormDistance < 0.5,
-        )
-
-        filament_outskirt_mask = np.logical_and(
-            self.ClusterNormDistance > 2.0,
-            np.logical_and(
-                self.FilamentNormDistance > 0.5,
-                self.FilamentNormDistance < 2.0,
-            ),
-        )
-
-        wall_mask = np.logical_and(
-            np.logical_and(
-                self.ClusterNormDistance > 2.0,
-                self.FilamentNormDistance > 2.0,
-            ),
-            self.WallDistance < 1e3,
-        )
-
-        void_mask = np.logical_and(
-            np.logical_and(
-                self.ClusterNormDistance > 2.0,
-                self.FilamentNormDistance > 2.0,
-            ),
-            self.WallDistance > 3e3,
-        )
-
-        wall_void_mask = np.logical_and(
-            self.ClusterNormDistance > 2.0,
-            self.FilamentNormDistance > 2.0,
-        )
-
-        return {
-            "cluster": cluster_mask,
-            "cluster_outskirt": cluster_outskirt_mask,
-            "filament": filament_mask,
-            "filament_outskirt": filament_outskirt_mask,
-            "wall": wall_mask,
-            "void": void_mask,
-            "wall_void": wall_void_mask,
-        }
-
-    def get_tidal_masks(self, tidal_threshold=3.0):
-        _cluster_inner_outskirt_mask = np.logical_and(
-            self.ClusterNormDistance > 0.5, self.ClusterNormDistance < 1.0
-        )
-        _filament_extended_outskirt_mask = np.logical_and(
-            self.ClusterNormDistance > 2.0,
-            np.logical_and(
-                self.FilamentNormDistance > 0.5, self.FilamentNormDistance < 2.0
-            ),
-        )
-
-        _shared_outskirt_mask = np.logical_and(
-            self.ClusterNormDistance > 1.0, self.ClusterNormDistance < 2.0
-        )
-
-        _tidal_ratio = self.ClusterTidal / self.FilamentTidal
-
-        cluster_outskirt_mask = np.logical_or(
-            _cluster_inner_outskirt_mask,
-            np.logical_and(_shared_outskirt_mask, _tidal_ratio > tidal_threshold),
-        )
-
-        filament_outskirt_mask = np.logical_or(
-            _filament_extended_outskirt_mask,
-            np.logical_and(
-                np.logical_and(
-                    _shared_outskirt_mask, _tidal_ratio < 1 / tidal_threshold
-                ),
-                self.FilamentNormDistance < 2.0,
-            ),
-        )
-
-        return {
-            "cluster_outskirt": cluster_outskirt_mask,
-            "filament_outskirt": filament_outskirt_mask,
-        }
+    def get_tidal_masks(self):
+        return self._env_mask.get_tidal_masks()
 
     def get_train_val_test_masks(
         self, off_set=0, train_frac=0.7, val_frac=0.15, box_size=302627
@@ -143,18 +70,18 @@ class GalaxyData:
 
         _val_mask = np.logical_or(
             np.logical_and(
-                _position[:, 0] > (train_frac / 2) * box_size + 2e3,
-                _position[:, 0] < (train_frac / 2 + val_frac / 2) * box_size + 2e3,
+                _position[:, 0] > (train_frac / 2) * box_size + 5e3,
+                _position[:, 0] < (train_frac / 2 + val_frac / 2) * box_size + 5e3,
             ),
             np.logical_and(
-                _position[:, 0] < (1 - train_frac / 2) * box_size - 2e3,
-                _position[:, 0] > (1 - train_frac / 2 - val_frac / 2) * box_size - 2e3,
+                _position[:, 0] < (1 - train_frac / 2) * box_size - 5e3,
+                _position[:, 0] > (1 - train_frac / 2 - val_frac / 2) * box_size - 5e3,
             ),
         )
 
         _test_mask = np.logical_and(
-            _position[:, 0] > (train_frac / 2 + val_frac / 2) * box_size + 4e3,
-            _position[:, 0] < (1 - train_frac / 2 - val_frac / 2) * box_size - 4e3,
+            _position[:, 0] > (train_frac / 2 + val_frac / 2) * box_size + 10e3,
+            _position[:, 0] < (1 - train_frac / 2 - val_frac / 2) * box_size - 10e3,
         )
 
         return {
