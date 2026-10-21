@@ -7,8 +7,8 @@ class EnvironmentMask:
         cluster_norm_distance,
         filament_norm_distance,
         wall_distance,
-        tidal_ratio,
-        cluster_thresholds=(0.5, 1.0, 1.5),
+        tidal_ratio=None,
+        cluster_thresholds=(0.5, 1, 1.5),
         filament_thresholds=(0.5, 2.0),
         wall_thresholds=(1e3, 2e3),
         tidal_threshold=3.0,
@@ -55,6 +55,10 @@ class EnvironmentMask:
         )
 
     def _get_tidal_cluster_filament_mask(self):
+        if self._tidal_ratio is None:
+            _msg = "Tidal ratio is not provided. Cannot compute tidal cluster/filament masks."
+            raise ValueError(_msg)
+
         cluster_mask = self._cluster_norm_distance < self._cluster_thresholds[0]
 
         _shared_outskirt_mask = np.logical_and(

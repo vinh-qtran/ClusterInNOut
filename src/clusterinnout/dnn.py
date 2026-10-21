@@ -6,9 +6,77 @@ import torch
 from scipy.optimize import minimize_scalar
 from sklearn.metrics import roc_auc_score, roc_curve
 from torch import nn, optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 from torchmetrics import Accuracy, ConfusionMatrix
 from tqdm import tqdm
+
+
+class DataLoaderBuilder:
+    def __init__(
+        self,
+        train_features: np.ndarray,
+        train_labels: np.ndarray,
+        val_features: np.ndarray,
+        val_labels: np.ndarray,
+        test_features: np.ndarray,
+        test_labels: np.ndarray,
+        batch_size: int = 640,
+        num_workers: int = 8,
+        seed: int = 42,
+    ):
+        torch.manual_seed(seed)
+
+        self._train_dataset = TensorDataset(
+            torch.as_tensor(train_features, dtype=torch.float32),
+            torch.as_tensor(train_labels, dtype=torch.long),
+        )
+        self._val_dataset = TensorDataset(
+            torch.as_tensor(val_features, dtype=torch.float32),
+            torch.as_tensor(val_labels, dtype=torch.long),
+        )
+        self._test_dataset = TensorDataset(
+            torch.as_tensor(test_features, dtype=torch.float32),
+            torch.as_tensor(test_labels, dtype=torch.long),
+        )
+
+        self._batch_size = batch_size
+        self._num_workers = num_workers
+
+    def get_train_val_test_loaders(self):
+        train_loader = DataLoader(
+            self._train_dataset,
+            batch_size=self._batch_size,
+            shuffle=True,
+            num_workers=self._num_workers,
+        )
+
+        val_loader = DataLoader(
+            self._val_dataset,
+            batch_size=self._batch_size,
+            shuffle=False,
+            num_workers=self._num_workers,
+        )
+
+        test_loader = DataLoader(
+            self._test_dataset,
+            batch_size=self._batch_size,
+            shuffle=False,
+            num_workers=self._num_workers,
+        )
+
+        return train_loader, val_loader, test_loader
+
+    def get_input_loader(self, features):
+        _data_set = TensorDataset(
+            torch.as_tensor(features, dtype=torch.float32),
+        )
+
+        return DataLoader(
+            _data_set,
+            batch_size=self._batch_size,
+            shuffle=False,
+            num_workers=self._num_workers,
+        )
 
 
 class SupervisedTraining:

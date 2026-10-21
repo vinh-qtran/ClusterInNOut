@@ -1,7 +1,5 @@
 import h5py
 import numpy as np
-import torch
-from torch.utils.data import DataLoader, TensorDataset
 
 from clusterinnout.label_utils import EnvironmentMask
 
@@ -59,29 +57,51 @@ class GalaxyData:
         return self._env_mask.get_tidal_masks()
 
     def get_train_val_test_masks(
-        self, off_set=0, train_frac=0.7, val_frac=0.15, box_size=302627
+        self,
+        fold=0,
+        n_folds=5,
+        test_frac=0.15,
+        test_center=None,
+        buffer=5e3,
+        box_size=302627,
     ):
-        _position = (self.Position + off_set) % box_size
+        """Spatial k-fold split along x in the periodic box.
 
-        _train_mask = np.logical_or(
-            _position[:, 0] < (train_frac / 2) * box_size,
-            _position[:, 0] > (1 - train_frac / 2) * box_size,
-        )
+        The test slab is fixed for every fold: the test_frac * box_size wide slab of x
+        centred on test_center (default: box centre). The rest of the box is one
+        contiguous arc that wraps through x = 0. A gap of `buffer` is dropped on each side
+        of the test slab, and what is left of the arc is cut into n_folds equal chunks:
+        fold k uses chunk k as val and the other chunks as train, with a gap of `buffer`
+        between train and val.
 
-        _val_mask = np.logical_or(
-            np.logical_and(
-                _position[:, 0] > (train_frac / 2) * box_size + 5e3,
-                _position[:, 0] < (train_frac / 2 + val_frac / 2) * box_size + 5e3,
-            ),
-            np.logical_and(
-                _position[:, 0] < (1 - train_frac / 2) * box_size - 5e3,
-                _position[:, 0] > (1 - train_frac / 2 - val_frac / 2) * box_size - 5e3,
-            ),
-        )
+        Across the n_folds folds, every galaxy outside the test slab and its gaps is in
+        val exactly once. The first and last folds have only one train-val gap (their
+        val chunk borders a test gap), so they train on ~1 buffer width more data.
+        """
+        if not 0 <= fold < n_folds:
+            _msg = f"fold must be in [0, {n_folds - 1}], got {fold}"
+            raise ValueError(_msg)
+        if test_center is None:
+            test_center = box_size / 2
 
-        _test_mask = np.logical_and(
-            _position[:, 0] > (train_frac / 2 + val_frac / 2) * box_size + 10e3,
-            _position[:, 0] < (1 - train_frac / 2 - val_frac / 2) * box_size - 10e3,
+        _test_width = test_frac * box_size
+        _test_start = test_center - _test_width / 2
+
+        # distance along x from the start of the test slab, wrapped into [0, box_size)
+        _u = (self.Position[:, 0] - _test_start) % box_size
+        _test_mask = _u < _test_width
+
+        # position along the train/val arc: 0 at the end of the test slab
+        # (test galaxies get negative values and so fall outside every arc range below)
+        _arc = _u - _test_width
+        _arc_length = box_size - _test_width
+        _edges = np.linspace(buffer, _arc_length - buffer, n_folds + 1)
+        _val_start, _val_end = _edges[fold], _edges[fold + 1]
+
+        _usable = (_arc >= _edges[0]) & (_arc < _edges[-1])
+        _val_mask = (_arc >= _val_start) & (_arc < _val_end)
+        _train_mask = _usable & (
+            (_arc < _val_start - buffer) | (_arc >= _val_end + buffer)
         )
 
         return {
@@ -89,71 +109,3 @@ class GalaxyData:
             "val": _val_mask,
             "test": _test_mask,
         }
-
-
-class DataLoaderBuilder:
-    def __init__(
-        self,
-        train_features: np.ndarray,
-        train_labels: np.ndarray,
-        val_features: np.ndarray,
-        val_labels: np.ndarray,
-        test_features: np.ndarray,
-        test_labels: np.ndarray,
-        batch_size: int = 640,
-        num_workers: int = 8,
-        seed: int = 42,
-    ):
-        torch.manual_seed(seed)
-
-        self._train_dataset = TensorDataset(
-            torch.as_tensor(train_features, dtype=torch.float32),
-            torch.as_tensor(train_labels, dtype=torch.long),
-        )
-        self._val_dataset = TensorDataset(
-            torch.as_tensor(val_features, dtype=torch.float32),
-            torch.as_tensor(val_labels, dtype=torch.long),
-        )
-        self._test_dataset = TensorDataset(
-            torch.as_tensor(test_features, dtype=torch.float32),
-            torch.as_tensor(test_labels, dtype=torch.long),
-        )
-
-        self._batch_size = batch_size
-        self._num_workers = num_workers
-
-    def get_train_val_test_loaders(self):
-        train_loader = DataLoader(
-            self._train_dataset,
-            batch_size=self._batch_size,
-            shuffle=True,
-            num_workers=self._num_workers,
-        )
-
-        val_loader = DataLoader(
-            self._val_dataset,
-            batch_size=self._batch_size,
-            shuffle=False,
-            num_workers=self._num_workers,
-        )
-
-        test_loader = DataLoader(
-            self._test_dataset,
-            batch_size=self._batch_size,
-            shuffle=False,
-            num_workers=self._num_workers,
-        )
-
-        return train_loader, val_loader, test_loader
-
-    def get_input_loader(self, features):
-        _data_set = TensorDataset(
-            torch.as_tensor(features, dtype=torch.float32),
-        )
-
-        return DataLoader(
-            _data_set,
-            batch_size=self._batch_size,
-            shuffle=False,
-            num_workers=self._num_workers,
-        )

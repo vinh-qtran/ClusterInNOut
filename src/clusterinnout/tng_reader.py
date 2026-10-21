@@ -7,8 +7,6 @@ from colossus.halo import splashback
 from colossus.lss import peaks
 from tqdm import tqdm
 
-from clusterinnout.distance_utils import periodic_cluster_match
-
 cosmology.setCosmology("planck15")
 
 
@@ -94,7 +92,7 @@ class BaseReader:
 
 
 class GroupReader(BaseReader):
-    def __init__(self, M200c_min=1e3, Rsp_R200m_scaler=1, **kwargs):
+    def __init__(self, M200c_min=1e2, Rsp_R200m_scaler="Diemer20", **kwargs):
         self._M200c_min = M200c_min
 
         self._Rsp_R200m_scaler = Rsp_R200m_scaler
@@ -113,7 +111,7 @@ class GroupReader(BaseReader):
                     "Rsp": np.empty(0),
                 }
 
-            Position = f["Group"]["GroupPos"][:] / self._h
+            Position = (f["Group"]["GroupPos"][:] / self._h) % self._box_size
 
             M200c = f["Group"]["Group_M_Crit200"][:] / self._h
             R200c = f["Group"]["Group_R_Crit200"][:] / self._h
@@ -182,7 +180,7 @@ class SubhaloReader(BaseReader):
                 }
 
             # Position
-            Position = f["Subhalo"]["SubhaloPos"][:] / self._h
+            Position = (f["Subhalo"]["SubhaloPos"][:] / self._h) % self._box_size
 
             # Mass
             Mass = f["Subhalo"]["SubhaloMass"][:] / self._h
@@ -284,19 +282,3 @@ class SubhaloReader(BaseReader):
                 "Vmax": Vmax[_mask],
                 "VmaxRadius": VmaxRadius[_mask],
             }
-
-    def match_to_cluster(
-        self, cluster_pos, cluster_radius, n_candidates=32, n_max=2048
-    ):
-        cluster_idx, cluster_norm_dist = periodic_cluster_match(
-            self.Position,
-            cluster_pos,
-            cluster_radius,
-            box_size=self._box_size,
-            n_candidates=n_candidates,
-            n_max=n_max,
-        )
-
-        self.ClusterIdx = cluster_idx
-        self.ClusterNormDistance = cluster_norm_dist
-        self.ClusterDistance = cluster_norm_dist * cluster_radius[cluster_idx]
