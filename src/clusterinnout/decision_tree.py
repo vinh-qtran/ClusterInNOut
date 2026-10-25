@@ -550,10 +550,35 @@ class GBTreeTraining:
 
         return labels, probs
 
-    def predict(self, features, model_path, temperature=1.0):
-        """Equal-mix probabilities, shape (n, K)."""
+    def predict(self, features, model_path, temperature=1.0, return_folds=False):
+        """Equal-mix probabilities, shape (n, K).
+
+        return_folds : also return each model's probabilities, shape (n_models, n, K).
+                     Use these for the uncertainty of any statistic computed from many
+                     galaxies (e.g. a mean in a bin): compute the statistic once per fold
+                     and take the std over folds. Per-galaxy stds cannot be combined
+                     as if independent, because one model's errors are correlated
+                     across galaxies.
+        Returns probs, followed by fold probabilities if requested.
+        """
         self._load(model_path)
-        return softmax(self._logits(features) / temperature, axis=1)
+        probs = softmax(self._logits(features) / temperature, axis=1)
+        if not return_folds:
+            return probs
+
+        if len(self._boosters) < 2:
+            _msg = (
+                "return_std / return_folds need several models (a train_kfold() folder)"
+            )
+            raise ValueError(_msg)
+        _fold_probs = np.stack(
+            [
+                softmax(b.predict(features, raw_score=True) / temperature, axis=1)
+                for b in self._boosters
+            ]
+        )  # (n_models, n, K)
+
+        return (probs, _fold_probs)
 
     # ------------------------------------------------------------------------------
     # SHAP interpretability
